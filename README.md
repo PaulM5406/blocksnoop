@@ -136,6 +136,101 @@ services:
 docker compose run --rm loopspy loopspy -t 100 -- python app.py
 ```
 
+## Kubernetes
+
+loopspy uses eBPF which operates at the kernel level, so you run it on the **node**, not inside the application container. The target process just needs to be visible from the host PID namespace.
+
+### Ephemeral debug container (recommended)
+
+Attach directly to a running pod with an ephemeral container:
+
+```bash
+# Find the pod
+kubectl get pods -l app=my-api
+
+# Attach an ephemeral debug container with the required privileges
+kubectl debug -it my-api-pod-7b8c9d \
+  --image=loopspy:latest \
+  --target=my-api \
+  -- sh
+```
+
+> The `--target` flag shares the process namespace with the app container, so you can see its PIDs.
+
+Inside the debug container, find the Python process and attach:
+
+```bash
+# Find the Python PID
+ps aux | grep python
+
+# Attach loopspy
+loopspy -t 50 <PID>
+
+# Or with structured logging
+loopspy --json -t 50 <PID>
+```
+
+This requires the ephemeral container to run as privileged. Your cluster must allow it (via PodSecurityPolicy, PodSecurityAdmission, or equivalent).
+
+### DaemonSet sidecar
+
+For continuous monitoring, deploy loopspy as a DaemonSet that monitors processes on each node:
+
+```yaml
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: loopspy
+spec:
+  selector:
+    matchLabels:
+      app: loopspy
+  template:
+    metadata:
+      labels:
+        app: loopspy
+    spec:
+      hostPID: true
+      containers:
+        - name: loopspy
+          image: loopspy:latest
+          command: ["loopspy", "--json", "--log-file", "/var/log/loopspy/events.json", "--service", "my-api", "--env", "production", "-t", "100"]
+          securityContext:
+            privileged: true
+          volumeMounts:
+            - name: logs
+              mountPath: /var/log/loopspy
+            - name: debugfs
+              mountPath: /sys/kernel/debug
+      volumes:
+        - name: logs
+          hostPath:
+            path: /var/log/loopspy
+        - name: debugfs
+          hostPath:
+            path: /sys/kernel/debug
+```
+
+The log file at `/var/log/loopspy/events.json` can be tailed by Datadog Agent, Fluentd, or any log collector running on the node.
+
+### Node shell (quick one-off)
+
+For a quick check without building images:
+
+```bash
+# SSH into the node (or use a node shell tool)
+kubectl node-shell <node-name>
+
+# Install loopspy
+pip install loopspy
+
+# Find the Python process (hostPID shows all processes)
+ps aux | grep python
+
+# Attach
+loopspy -t 50 <PID>
+```
+
 ## Development
 
 ```bash
