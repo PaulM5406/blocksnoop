@@ -14,6 +14,10 @@ _YELLOW = "\033[33m"
 _RED = "\033[31m"
 _DIM = "\033[2m"
 
+# Stdlib modules whose frames are noise in console stack traces.
+# They are kept in JSON sinks for completeness.
+_HIDDEN_PREFIXES = ("asyncio/", "selectors.py", "threading.py")
+
 
 def _level_for_duration(duration_ms: float) -> str:
     """Classify severity based on blocking duration."""
@@ -62,12 +66,25 @@ class ConsoleSink:
 
         stack = record.get("python_stack")
         if stack:
+            # Filter out asyncio/stdlib internals for readability
+            app_frames = [
+                f
+                for f in stack
+                if not any(f["file"].startswith(p) for p in _HIDDEN_PREFIXES)
+            ]
+            frames_to_show = app_frames if app_frames else stack
             self._stream.write("  Python stack (most recent call last):\n")
-            for frame in stack:
+            for frame in frames_to_show:
                 line = f"    {frame['file']}:{frame['line']} in {frame['function']}"
                 if self._color:
                     line = f"{_DIM}{line}{_RESET}"
                 self._stream.write(line + "\n")
+            if len(frames_to_show) < len(stack):
+                hidden = len(stack) - len(frames_to_show)
+                note = f"    ... {hidden} asyncio/stdlib frames hidden"
+                if self._color:
+                    note = f"{_DIM}{note}{_RESET}"
+                self._stream.write(note + "\n")
             self._stream.write("\n")
         else:
             self._stream.write("  (no Python stack captured)\n")

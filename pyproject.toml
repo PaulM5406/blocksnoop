@@ -8,14 +8,12 @@ version = "0.1.0"
 description = "Detect blocking calls in asyncio event loops using eBPF + py-spy"
 readme = "README.md"
 authors = [{name = "Paul Milesi"}]
-license = {text = "MIT"}
-license-files = ["LICENSE"]
+license = "MIT"
 requires-python = ">=3.12"
 keywords = ["asyncio", "blocking", "ebpf", "event-loop", "profiling", "debugging"]
 classifiers = [
     "Development Status :: 3 - Alpha",
     "Intended Audience :: Developers",
-    "License :: OSI Approved :: MIT License",
     "Programming Language :: Python :: 3",
     "Programming Language :: Python :: 3.12",
     "Programming Language :: Python :: 3.13",

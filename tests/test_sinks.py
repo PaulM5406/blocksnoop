@@ -109,6 +109,44 @@ def test_console_color_dim_stack():
     assert "\033[2m" in output  # dim for stack frames
 
 
+def test_console_hides_asyncio_frames():
+    """asyncio/stdlib frames are hidden from console output."""
+    record = _make_record()
+    record["python_stack"] = [
+        {"function": "blocking_io", "file": "app.py", "line": 7},
+        {"function": "main", "file": "app.py", "line": 13},
+        {"function": "_run", "file": "asyncio/events.py", "line": 89},
+        {"function": "_run_once", "file": "asyncio/base_events.py", "line": 2050},
+        {"function": "run_forever", "file": "asyncio/base_events.py", "line": 683},
+        {"function": "select", "file": "selectors.py", "line": 452},
+    ]
+    buf = StringIO()
+    sink = ConsoleSink(stream=buf, color=False)
+    sink.emit(record)
+    output = buf.getvalue()
+    assert "blocking_io" in output
+    assert "app.py:13 in main" in output
+    assert "asyncio/events.py" not in output
+    assert "selectors.py:452" not in output
+    assert "4 asyncio/stdlib frames hidden" in output
+
+
+def test_console_shows_all_if_only_stdlib():
+    """If all frames are stdlib, show them anyway (don't hide everything)."""
+    record = _make_record()
+    record["python_stack"] = [
+        {"function": "select", "file": "selectors.py", "line": 452},
+        {"function": "_run_once", "file": "asyncio/base_events.py", "line": 2050},
+    ]
+    buf = StringIO()
+    sink = ConsoleSink(stream=buf, color=False)
+    sink.emit(record)
+    output = buf.getvalue()
+    assert "selectors.py" in output
+    assert "asyncio/" in output
+    assert "hidden" not in output
+
+
 # --- JsonStreamSink ---
 
 
