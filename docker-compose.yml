@@ -1,0 +1,8 @@
+services:
+  loopspy:
+    build: .
+    privileged: true
+    pid: host
+    volumes:
+      - .:/app
+      - /sys/kernel/debug:/sys/kernel/debug
