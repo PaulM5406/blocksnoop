@@ -1,8 +1,10 @@
 """
-Example: Async worker with a mix of correct and incorrect patterns.
+Example: Async workers with a mix of correct and incorrect patterns.
 
-Some tasks correctly use asyncio, others accidentally block.
-Fast sync operations (JSON, regex, in-memory DB) should NOT be flagged.
+Each worker demonstrates three categories:
+  - FAST SYNC: quick in-memory ops (SQLite, JSON, regex) — not flagged
+  - ASYNC: properly non-blocking (to_thread, gather, async sleep) — not flagged
+  - SLOW SYNC (BUG): blocking calls on the event loop — FLAGGED by loopspy
 
 Run with:
     docker compose run --rm loopspy loopspy -t 50 -- python examples/mixed_workload.py
@@ -19,7 +21,7 @@ import time
 
 
 # ---------------------------------------------------------------------------
-# GOOD: properly async operations
+# ASYNC: properly non-blocking operations
 # ---------------------------------------------------------------------------
 
 
@@ -32,6 +34,38 @@ async def fetch_data_async(item_id: int) -> dict:
 async def process_batch_async(items: list[int]) -> list[dict]:
     """Correct: concurrent async gathering."""
     return await asyncio.gather(*(fetch_data_async(i) for i in items))
+
+
+def _blocking_db_write(query: str) -> dict:
+    """The underlying blocking work."""
+    time.sleep(0.2)
+    return {"rows": 42, "query": query}
+
+
+async def async_db_write(query: str) -> dict:
+    """Correct: offloads blocking DB write to a thread."""
+    return await asyncio.to_thread(_blocking_db_write, query)
+
+
+def _blocking_compress(data: str) -> bytes:
+    """The underlying blocking work."""
+    time.sleep(0.15)
+    return data.encode()
+
+
+async def async_compress(data: str) -> bytes:
+    """Correct: offloads blocking compression to a thread."""
+    return await asyncio.to_thread(_blocking_compress, data)
+
+
+def _blocking_notify(channel: str, message: str) -> None:
+    """The underlying blocking work."""
+    time.sleep(0.1)
+
+
+async def async_notify(channel: str, message: str) -> None:
+    """Correct: offloads blocking notification to a thread."""
+    await asyncio.to_thread(_blocking_notify, channel, message)
 
 
 # ---------------------------------------------------------------------------
@@ -107,17 +141,18 @@ def slow_write_audit_log(entry: str) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Workers that mix fast sync, async, and slow sync
+# Workers that mix all three categories
 # ---------------------------------------------------------------------------
 
 
 async def ingest_worker() -> None:
     """Fetches data async, does fast sync processing, then blocks on slow DB."""
     while True:
+        # Async — OK
         items = await process_batch_async([1, 2, 3])
         print(f"[ingest] fetched {len(items)} items (async)")
 
-        # Fast sync — should NOT be flagged
+        # Fast sync — OK
         payload = json.dumps({"items": items, "id": "batch-001"})
         parsed = quick_parse_payload(payload)
         checksum = quick_hash_md5(payload)
@@ -125,7 +160,12 @@ async def ingest_worker() -> None:
         quick_write_temp_file(payload)
         print(f"[ingest] processed locally: checksum={checksum[:8]} (fast sync, OK)")
 
-        # Slow sync — SHOULD be flagged
+        # Async — OK, uses to_thread
+        compressed = await async_compress(payload)
+        await async_notify("ingest", f"batch ready: {len(compressed)} bytes")
+        print(f"[ingest] compressed + notified (async, OK)")
+
+        # Slow sync — FLAGGED
         result = slow_read_from_db("INSERT INTO events ...")  # blocks!
         print(f"[ingest] wrote {result['rows']} rows (sync, BLOCKING)")
 
@@ -133,34 +173,42 @@ async def ingest_worker() -> None:
 
 
 async def auth_worker() -> None:
-    """Does fast cache check, then blocks on CPU-heavy hashing."""
+    """Does fast cache check, correct async DB, then blocks on CPU-heavy hash."""
     while True:
         await asyncio.sleep(1.0)
 
-        # Fast sync — should NOT be flagged
+        # Fast sync — OK
         cached = quick_cache_get("auth:last-token")
         quick_cache_set("auth:attempts", str(time.time()))
         print(f"[auth] cache check: {'hit' if cached else 'miss'} (fast sync, OK)")
 
-        # Slow sync — SHOULD be flagged
+        # Async — OK, uses to_thread
+        await async_db_write("UPDATE sessions SET last_seen = NOW()")
+        print("[auth] updated session (async, OK)")
+
+        # Slow sync — FLAGGED
         token = slow_hash_token("user-session-abc123")  # blocks!
         quick_cache_set("auth:last-token", token)
         print(f"[auth] hashed token -> {token} (sync, BLOCKING)")
 
 
 async def payment_worker() -> None:
-    """Does fast validation, then blocks on remote API + audit log."""
+    """Does fast validation, correct async notification, then blocks on API."""
     while True:
         await asyncio.sleep(1.2)
 
-        # Fast sync — should NOT be flagged
+        # Fast sync — OK
         order = {"id": "ORD-12345", "amount": 99.99, "currency": "EUR"}
         order_json = json.dumps(order)
         valid_id = bool(re.match(r"^ORD-\d+$", order["id"]))
         quick_write_temp_file(order_json)
         print(f"[payment] validated order {order['id']}: {valid_id} (fast sync, OK)")
 
-        # Slow sync — SHOULD be flagged
+        # Async — OK, uses to_thread
+        await async_notify("payments", f"processing {order['id']}")
+        print("[payment] notified (async, OK)")
+
+        # Slow sync — FLAGGED
         resp = slow_call_payment_api(99.99)  # blocks!
         print(f"[payment] charged {resp['amount']} (sync, BLOCKING)")
 
@@ -170,10 +218,8 @@ async def payment_worker() -> None:
 
 async def main() -> None:
     print("=== Mixed workload: 3 async workers with different blocking bugs ===")
-    print("loopspy should flag: slow_read_from_db, slow_hash_token,")
-    print("  slow_call_payment_api, slow_write_audit_log")
-    print("loopspy should NOT flag: quick_cache_get, quick_cache_set,")
-    print("  quick_hash_md5, quick_parse_payload, quick_write_temp_file\n")
+    print("FLAGGED:     slow_read_from_db, slow_hash_token, slow_call_payment_api, slow_write_audit_log")
+    print("NOT FLAGGED: quick_* (fast sync), async_* (to_thread), fetch_data_async (gather)\n")
     await asyncio.gather(
         ingest_worker(),
         auth_worker(),
