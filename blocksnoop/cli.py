@@ -94,7 +94,7 @@ def main() -> None:
 
     # Validation: bcc must be importable
     try:
-        import bcc  # noqa: F401
+        import bcc  # noqa: F401  # type: ignore[unresolved-import]
     except ImportError:
         print("error: bcc (BPF Compiler Collection) is not installed", file=sys.stderr)
         sys.exit(1)
@@ -126,7 +126,8 @@ def main() -> None:
         child_process = subprocess.Popen(command)
         pid = child_process.pid
     else:
-        pid = target_pid  # type: ignore[assignment]
+        assert target_pid is not None
+        pid = target_pid
 
     # Wire the pipeline
     config = DetectorConfig(pid=pid, threshold_ms=args.threshold, tid=args.tid)

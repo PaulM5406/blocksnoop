@@ -8,7 +8,7 @@ version = "0.1.0"
 description = "Detect blocking calls in asyncio event loops using eBPF + py-spy"
 readme = "README.md"
 authors = [{name = "Paul Milesi"}]
-license = "MIT"
+license = "GPL-3.0-or-later"
 requires-python = ">=3.12"
 keywords = ["asyncio", "blocking", "ebpf", "event-loop", "profiling", "debugging"]
 classifiers = [
