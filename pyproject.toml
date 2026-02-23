@@ -31,7 +31,7 @@ Issues = "https://github.com/PaulM5406/blocksnoop/issues"
 blocksnoop = "blocksnoop.cli:main"
 
 [project.optional-dependencies]
-dev = ["ruff", "ty", "pytest"]
+dev = ["ruff>=0.15,<0.16", "ty", "pytest"]
 
 [tool.ruff]
 target-version = "py312"

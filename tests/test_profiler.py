@@ -184,9 +184,11 @@ def test_loopspy_austin_on_sample_skips_no_frames():
 
 def test_austin_sampler_start_stop():
     """AustinSampler creates _LoopspyAustin, starts it, and stops cleanly."""
-    with patch.object(_LoopspyAustin, "start") as mock_start, patch.object(
-        _LoopspyAustin, "terminate"
-    ) as mock_terminate, patch.object(_LoopspyAustin, "join") as mock_join:
+    with (
+        patch.object(_LoopspyAustin, "start") as mock_start,
+        patch.object(_LoopspyAustin, "terminate") as mock_terminate,
+        patch.object(_LoopspyAustin, "join") as mock_join,
+    ):
         sampler = AustinSampler(pid=100, sample_interval_ms=33, tid=100)
         sampler.start()
 

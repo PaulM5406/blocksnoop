@@ -15,16 +15,16 @@ def cpu_result(docker_image):
 
 
 def test_detects_cpu_blocking(cpu_result):
-    assert (
-        len(cpu_result.events) >= 1
-    ), f"Expected at least 1 event, got {len(cpu_result.events)}"
+    assert len(cpu_result.events) >= 1, (
+        f"Expected at least 1 event, got {len(cpu_result.events)}"
+    )
 
 
 def test_duration_above_threshold(cpu_result):
     for event in cpu_result.events:
-        assert (
-            event["duration_ms"] >= 100
-        ), f"Event duration {event['duration_ms']}ms below 100ms threshold"
+        assert event["duration_ms"] >= 100, (
+            f"Event duration {event['duration_ms']}ms below 100ms threshold"
+        )
 
 
 def test_stack_contains_cpu_heavy(cpu_result):
