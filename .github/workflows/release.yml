@@ -1,0 +1,66 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: read
+
+jobs:
+  ci-check:
+    name: Verify CI passed
+    runs-on: ubuntu-latest
+    steps:
+      - name: Wait for CI workflow to pass
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          SHA=${{ github.sha }}
+          echo "Waiting for CI to complete on $SHA..."
+          for i in $(seq 1 30); do
+            STATUS=$(gh api "repos/${{ github.repository }}/actions/workflows/ci.yml/runs" \
+              --jq ".workflow_runs[] | select(.head_sha == \"$SHA\") | .conclusion" | head -1)
+            if [ "$STATUS" = "success" ]; then
+              echo "CI passed!"
+              exit 0
+            elif [ "$STATUS" = "failure" ] || [ "$STATUS" = "cancelled" ]; then
+              echo "::error::CI workflow failed for commit $SHA (status: $STATUS)"
+              exit 1
+            fi
+            echo "Attempt $i/30: CI status is '${STATUS:-pending}', waiting 30s..."
+            sleep 30
+          done
+          echo "::error::Timed out waiting for CI to pass (15 minutes)"
+          exit 1
+
+  build:
+    name: Build packages
+    needs: [ci-check]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+      - run: uv build
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist
+          path: dist/
+
+  publish:
+    name: Publish to PyPI
+    needs: [build]
+    runs-on: ubuntu-latest
+    environment: release
+    permissions:
+      id-token: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist/
+      - uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          packages-dir: dist/
+          skip-existing: true
