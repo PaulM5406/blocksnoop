@@ -4,6 +4,11 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
+# Stdlib module prefixes whose frames are noise in stack traces.
+# Used by the correlator (to find the deepest app frame) and console sink
+# (to hide asyncio/stdlib internals).
+STDLIB_FRAME_PREFIXES: tuple[str, ...] = ("asyncio/", "selectors.py", "threading.py")
+
 
 @dataclass(frozen=True)
 class StackFrame:
@@ -25,7 +30,7 @@ class BlockingEvent:
     end_ns: int
     pid: int
     tid: int
-    python_stack: PythonStackTrace | None = None
+    python_stacks: tuple[PythonStackTrace, ...] = ()
 
     @property
     def duration_ms(self) -> float:
@@ -37,6 +42,7 @@ class DetectorConfig:
     pid: int
     threshold_ms: float = 100.0
     tid: int | None = None
+    correlation_padding_ms: float = 200.0
     sample_interval_ms: float = field(init=False)
 
     def __post_init__(self) -> None:

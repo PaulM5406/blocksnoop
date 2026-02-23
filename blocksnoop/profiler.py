@@ -1,74 +1,24 @@
-"""Profiler module for blocksnoop — py-spy based stack sampling."""
+"""Profiler module for blocksnoop — stack sampling via Austin."""
 
 from __future__ import annotations
 
 import bisect
-import re
+import logging
 import shutil
-import subprocess
 import threading
 import time
-from typing import Optional
+
+from austin.stats import AustinSample
+from austin.threads import ThreadedAustin
 
 from blocksnoop.core import PythonStackTrace, StackFrame
 
-
-def check_pyspy_available() -> bool:
-    """Return True if py-spy binary is found in PATH."""
-    return shutil.which("py-spy") is not None
+_logger = logging.getLogger("blocksnoop.profiler")
 
 
-def _parse_pyspy_output(raw: str, tid: int) -> Optional[PythonStackTrace]:
-    """Parse py-spy raw format output for a specific thread id.
-
-    Expected format::
-
-        Thread 12345 (idle): "MainThread"
-          compute_heavy (app.py:42)
-          handle_request (app.py:30)
-
-        Thread 12346 (active): "WorkerThread"
-          do_work (worker.py:10)
-
-    Returns the PythonStackTrace for the thread matching tid, or None if not found.
-    """
-    thread_header = re.compile(
-        r'^Thread\s+(\d+)\s+\([^)]*\):\s+"([^"]*)"', re.MULTILINE
-    )
-    frame_line = re.compile(r"^\s+(\S+)\s+\(([^:]+):(\d+)\)\s*$")
-
-    # Split into per-thread blocks by finding header positions
-    headers = list(thread_header.finditer(raw))
-    if not headers:
-        return None
-
-    target_block: Optional[tuple[int, str, str]] = None  # (thread_id, name, block_text)
-    for idx, match in enumerate(headers):
-        thread_id = int(match.group(1))
-        thread_name = match.group(2)
-        block_start = match.end()
-        block_end = headers[idx + 1].start() if idx + 1 < len(headers) else len(raw)
-        if thread_id == tid:
-            target_block = (thread_id, thread_name, raw[block_start:block_end])
-            break
-
-    if target_block is None:
-        return None
-
-    thread_id, thread_name, block_text = target_block
-    frames: list[StackFrame] = []
-    for line in block_text.splitlines():
-        m = frame_line.match(line)
-        if m:
-            frames.append(
-                StackFrame(function=m.group(1), file=m.group(2), line=int(m.group(3)))
-            )
-
-    return PythonStackTrace(
-        thread_id=thread_id,
-        thread_name=thread_name,
-        frames=tuple(frames),
-    )
+def check_austin_available() -> bool:
+    """Return True if austin binary is found in PATH."""
+    return shutil.which("austin") is not None
 
 
 class StackRingBuffer:
@@ -79,10 +29,16 @@ class StackRingBuffer:
 
     def __init__(self, size: int = 256) -> None:
         self._size = size
-        self._buffer: list[Optional[tuple[int, PythonStackTrace]]] = [None] * size
+        self._buffer: list[tuple[int, PythonStackTrace] | None] = [None] * size
         self._head = 0  # index of next write position
         self._count = 0  # number of valid entries
+        self._overflow_count = 0
         self._lock = threading.Lock()
+
+    @property
+    def overflow_count(self) -> int:
+        """Number of entries lost to overflow."""
+        return self._overflow_count
 
     def push(self, timestamp_ns: int, stack: PythonStackTrace) -> None:
         """Add an entry, overwriting the oldest entry when the buffer is full."""
@@ -91,6 +47,14 @@ class StackRingBuffer:
             self._head = (self._head + 1) % self._size
             if self._count < self._size:
                 self._count += 1
+            else:
+                self._overflow_count += 1
+                if self._overflow_count == 1:
+                    _logger.warning(
+                        "Stack ring buffer overflow (size=%d) — oldest samples "
+                        "are being dropped. Consider increasing buffer size.",
+                        self._size,
+                    )
 
     def _ordered_entries(self) -> list[tuple[int, PythonStackTrace]]:
         """Return entries in chronological order (oldest first). Must hold lock."""
@@ -107,10 +71,36 @@ class StackRingBuffer:
                 ordered.append(entry)
         return ordered
 
-    def find_in_range(self, start_ns: int, end_ns: int) -> Optional[PythonStackTrace]:
+    def find_all_in_range(self, start_ns: int, end_ns: int) -> list[PythonStackTrace]:
+        """Return all samples within [start_ns, end_ns], oldest first."""
+        with self._lock:
+            entries = self._ordered_entries()
+
+        if not entries:
+            return []
+
+        timestamps = [e[0] for e in entries]
+        lo = bisect.bisect_left(timestamps, start_ns)
+        hi = bisect.bisect_right(timestamps, end_ns)
+        return [entries[i][1] for i in range(lo, hi)]
+
+    def find_in_range(self, start_ns: int, end_ns: int) -> PythonStackTrace | None:
         """Binary search for the snapshot closest to start_ns within [start_ns, end_ns].
 
         Returns None if no entry falls within the window.
+        """
+        return self.find_nearest(target_ns=start_ns, start_ns=start_ns, end_ns=end_ns)
+
+    def find_nearest(
+        self,
+        target_ns: int,
+        start_ns: int,
+        end_ns: int,
+    ) -> PythonStackTrace | None:
+        """Return the sample closest to *target_ns* within [start_ns, end_ns].
+
+        Uses binary search on the chronologically-ordered entries.
+        Returns ``None`` if no entry falls within the window.
         """
         with self._lock:
             entries = self._ordered_entries()
@@ -120,10 +110,10 @@ class StackRingBuffer:
 
         timestamps = [e[0] for e in entries]
 
-        # Find insertion point for start_ns
-        pos = bisect.bisect_left(timestamps, start_ns)
+        # Find insertion point for target_ns
+        pos = bisect.bisect_left(timestamps, target_ns)
 
-        best: Optional[tuple[int, PythonStackTrace]] = None
+        best: tuple[int, PythonStackTrace] | None = None
         best_diff = end_ns - start_ns + 1  # larger than any valid diff
 
         # Check the entry at pos and pos-1 as candidates
@@ -131,7 +121,7 @@ class StackRingBuffer:
             if 0 <= idx < len(entries):
                 ts, stack = entries[idx]
                 if start_ns <= ts <= end_ns:
-                    diff = abs(ts - start_ns)
+                    diff = abs(ts - target_ns)
                     if diff < best_diff:
                         best_diff = diff
                         best = (ts, stack)
@@ -139,53 +129,72 @@ class StackRingBuffer:
         return best[1] if best is not None else None
 
 
-class StackSampler:
-    """Background daemon thread that periodically samples a process via py-spy."""
+class _LoopspyAustin(ThreadedAustin):
+    """ThreadedAustin subclass that pushes samples to a ring buffer."""
+
+    def __init__(self, ring_buffer: StackRingBuffer, tid: int) -> None:
+        super().__init__()
+        self._ring_buffer = ring_buffer
+        self._tid = tid
+
+    def on_sample(self, sample: AustinSample) -> None:
+        if sample.frames is None:
+            return
+        try:
+            if int(sample.thread, 16) != self._tid:
+                return
+        except (ValueError, TypeError):
+            return
+        frames = tuple(
+            StackFrame(function=f.function, file=f.filename, line=f.line)
+            for f in sample.frames
+        )
+        self._ring_buffer.push(
+            time.monotonic_ns(),
+            PythonStackTrace(thread_id=self._tid, thread_name="", frames=frames),
+        )
+
+
+class AustinSampler:
+    """Background sampler using Austin via austin-python's ThreadedAustin."""
 
     def __init__(
-        self, pid: int, sample_interval_ms: float, tid: Optional[int] = None
+        self, pid: int, sample_interval_ms: float, tid: int | None = None
     ) -> None:
         self._pid = pid
         self._tid = tid if tid is not None else pid
-        self._interval_s = sample_interval_ms / 1000.0
+        self._interval_us = int(sample_interval_ms * 1000)
         self.ring_buffer = StackRingBuffer()
-        self._stop_event = threading.Event()
-        self._thread: Optional[threading.Thread] = None
+        self._austin: _LoopspyAustin | None = None
 
     def start(self) -> None:
-        """Start the background sampling thread."""
-        if self._thread is not None and self._thread.is_alive():
+        """Spawn Austin and start sampling."""
+        if self._austin is not None:
             return
-        self._stop_event.clear()
-        self._thread = threading.Thread(
-            target=self._run, daemon=True, name="blocksnoop-sampler"
+        self._austin = _LoopspyAustin(self.ring_buffer, self._tid)
+        self._austin.start(
+            [
+                "-i",
+                str(self._interval_us),
+                "-p",
+                str(self._pid),
+            ]
         )
-        self._thread.start()
 
     def stop(self) -> None:
-        """Signal the sampling thread to stop and wait for it to finish."""
-        self._stop_event.set()
-        if self._thread is not None:
-            self._thread.join()
-            self._thread = None
-
-    def _run(self) -> None:
-        while not self._stop_event.is_set():
-            self._sample()
-            self._stop_event.wait(timeout=self._interval_s)
-
-    def _sample(self) -> None:
-        try:
-            result = subprocess.run(
-                ["py-spy", "dump", "--pid", str(self._pid)],
-                capture_output=True,
-                text=True,
-                timeout=max(self._interval_s * 2, 5.0),
-            )
-            raw = result.stdout
-        except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
+        """Terminate Austin and wait for the thread."""
+        if self._austin is None:
             return
-
-        stack = _parse_pyspy_output(raw, self._tid)
-        if stack is not None:
-            self.ring_buffer.push(time.monotonic_ns(), stack)
+        try:
+            self._austin.terminate()
+        except OSError:
+            _logger.debug("Austin process already terminated")
+        except Exception:
+            _logger.warning("Unexpected error terminating Austin", exc_info=True)
+        try:
+            self._austin.join(timeout=5)
+        except OSError:
+            _logger.debug("Austin thread already joined")
+        except Exception:
+            _logger.warning("Unexpected error joining Austin thread", exc_info=True)
+        self._austin = None

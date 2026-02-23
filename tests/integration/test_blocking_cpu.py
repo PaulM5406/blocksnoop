@@ -31,17 +31,18 @@ def test_stack_contains_cpu_heavy(cpu_result):
     """At least one event's stack should reference cpu_heavy."""
     stacks_with_match = []
     for event in cpu_result.events:
-        stack = event.get("python_stack")
-        if stack is None:
+        stacks = event.get("python_stacks")
+        if not stacks:
             continue
-        for frame in stack:
-            if "cpu_heavy" in frame.get("function", "") or "cpu_heavy" in frame.get(
-                "file", ""
-            ):
-                stacks_with_match.append(event)
-                break
+        for stack in stacks:
+            for frame in stack:
+                if "cpu_heavy" in frame.get("function", "") or "cpu_heavy" in frame.get(
+                    "file", ""
+                ):
+                    stacks_with_match.append(event)
+                    break
 
-    if not any(e.get("python_stack") for e in cpu_result.events):
+    if not any(e.get("python_stacks") for e in cpu_result.events):
         pytest.skip("No stacks captured in this run")
 
     assert len(stacks_with_match) > 0, "No stack referenced cpu_heavy"

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import logging
 import os
 import signal
 import subprocess
@@ -12,12 +13,18 @@ import time
 from blocksnoop.core import DetectorConfig
 from blocksnoop.correlator import Correlator
 from blocksnoop.detector import EbpfDetector
-from blocksnoop.profiler import StackSampler, check_pyspy_available
+from blocksnoop.profiler import (
+    AustinSampler,
+    check_austin_available,
+)
 from blocksnoop.reporter import Reporter
 from blocksnoop.sinks import ConsoleSink, JsonFileSink, JsonStreamSink, Sink
 
 
-def main() -> None:
+def _parse_args(
+    argv: list[str] | None = None,
+) -> tuple[argparse.Namespace, argparse.ArgumentParser]:
+    """Parse CLI arguments and return (namespace, parser)."""
     parser = argparse.ArgumentParser(
         description="Detect blocking calls in asyncio event loops"
     )
@@ -62,9 +69,29 @@ def main() -> None:
     parser.add_argument(
         "--no-color", action="store_true", help="Disable ANSI colors in terminal output"
     )
+    parser.add_argument(
+        "-v", "--verbose", action="store_true", help="Enable debug logging to stderr"
+    )
+    parser.add_argument(
+        "--error-threshold",
+        type=float,
+        default=500.0,
+        metavar="MS",
+        help="Duration in ms above which events are classified as errors (default: 500)",
+    )
+    parser.add_argument(
+        "--correlation-padding",
+        type=float,
+        default=200.0,
+        metavar="MS",
+        help="Correlation time window padding in ms (default: 200)",
+    )
 
-    args = parser.parse_args()
+    return parser.parse_args(argv), parser
 
+
+def _resolve_target(args: argparse.Namespace) -> tuple[int | None, list[str]]:
+    """Return (target_pid, command) from parsed args."""
     # Strip leading "--" from command list (used as separator: blocksnoop -- python app.py)
     command: list[str] = list(args.command)
     if command and command[0] == "--":
@@ -79,25 +106,73 @@ def main() -> None:
         except ValueError:
             command = [args.target] + command
 
-    # Validation: must be root
+    return target_pid, command
+
+
+def _validate_environment() -> None:
+    """Check runtime prerequisites; exits on failure."""
     if os.geteuid() != 0:
         print("error: blocksnoop must be run as root (sudo)", file=sys.stderr)
         sys.exit(1)
 
-    # Validation: py-spy must be available
-    if not check_pyspy_available():
+    if not check_austin_available():
         print(
-            "error: py-spy not found in PATH. Install with: pip install py-spy",
+            "error: austin not found in PATH.\n"
+            "  Install: https://github.com/P403n1x87/austin",
             file=sys.stderr,
         )
         sys.exit(1)
 
-    # Validation: bcc must be importable
     try:
         import bcc  # noqa: F401  # type: ignore[unresolved-import]
     except ImportError:
-        print("error: bcc (BPF Compiler Collection) is not installed", file=sys.stderr)
+        print(
+            "error: bcc (BPF Compiler Collection) is not installed.\n"
+            "  Install: https://github.com/iovisor/bcc/blob/master/INSTALL.md",
+            file=sys.stderr,
+        )
         sys.exit(1)
+
+
+def _build_sinks(args: argparse.Namespace) -> list[Sink]:
+    """Assemble output sinks from parsed args."""
+    sinks: list[Sink] = []
+    if args.json_mode:
+        sinks.append(
+            JsonStreamSink(sys.stdout, error_threshold_ms=args.error_threshold)
+        )
+    else:
+        sinks.append(
+            ConsoleSink(
+                sys.stderr,
+                color=not args.no_color,
+                error_threshold_ms=args.error_threshold,
+            )
+        )
+    if args.log_file:
+        sinks.append(
+            JsonFileSink(
+                path=args.log_file,
+                service=args.service,
+                env=args.env,
+                error_threshold_ms=args.error_threshold,
+            )
+        )
+    return sinks
+
+
+def main() -> None:
+    args, parser = _parse_args()
+
+    logging.basicConfig(
+        level=logging.DEBUG if args.verbose else logging.WARNING,
+        stream=sys.stderr,
+        format="%(name)s %(levelname)s: %(message)s",
+    )
+
+    target_pid, command = _resolve_target(args)
+
+    _validate_environment()
 
     # Validation: must have either a PID or a command
     if target_pid is None and not command:
@@ -108,16 +183,7 @@ def main() -> None:
         )
         sys.exit(1)
 
-    # Assemble sinks
-    sinks: list[Sink] = []
-    if args.json_mode:
-        sinks.append(JsonStreamSink(sys.stdout))
-    else:
-        sinks.append(ConsoleSink(sys.stderr, color=not args.no_color))
-    if args.log_file:
-        sinks.append(
-            JsonFileSink(path=args.log_file, service=args.service, env=args.env)
-        )
+    sinks = _build_sinks(args)
 
     child_process: subprocess.Popen | None = None
 
@@ -126,17 +192,24 @@ def main() -> None:
         child_process = subprocess.Popen(command)
         pid = child_process.pid
     else:
-        assert target_pid is not None
+        assert target_pid is not None  # guaranteed by validation above
         pid = target_pid
 
     # Wire the pipeline
-    config = DetectorConfig(pid=pid, threshold_ms=args.threshold, tid=args.tid)
+    config = DetectorConfig(
+        pid=pid,
+        threshold_ms=args.threshold,
+        tid=args.tid,
+        correlation_padding_ms=args.correlation_padding,
+    )
     reporter = Reporter(sinks=sinks)
-    sampler = StackSampler(
+    sampler = AustinSampler(
         pid=pid, sample_interval_ms=config.sample_interval_ms, tid=config.tid
     )
     correlator = Correlator(
-        ring_buffer=sampler.ring_buffer, reporter_callback=reporter.report
+        ring_buffer=sampler.ring_buffer,
+        reporter_callback=reporter.report,
+        correlation_padding_ns=int(config.correlation_padding_ms * 1_000_000),
     )
     detector = EbpfDetector(config=config, callback=correlator.on_event)
 

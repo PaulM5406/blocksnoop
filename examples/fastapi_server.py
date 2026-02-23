@@ -6,8 +6,14 @@ synchronous operations inside async handlers, blocking the event loop.
 
 Each handler has three categories of code:
   - FAST SYNC: quick in-memory ops (SQLite, JSON, regex) — not flagged
-  - ASYNC: properly non-blocking (to_thread, async sleep) — not flagged
+  - ASYNC I/O: non-blocking via to_thread (I/O-bound only) — not flagged
   - SLOW SYNC (BUG): blocking calls on the event loop — FLAGGED by blocksnoop
+
+Note on to_thread and the GIL:
+  to_thread() only helps for I/O-bound work (network, disk, sleep) because
+  the thread releases the GIL while waiting. For CPU-bound Python code
+  (hash loops, compression), to_thread() does NOT help — the GIL prevents
+  the event loop thread from running. Those remain as bugs.
 
 Run with:
     docker compose run --rm blocksnoop blocksnoop -t 50 -- python examples/fastapi_server.py
@@ -100,26 +106,25 @@ def _slow_http_call(url: str) -> dict:
 
 
 # ---------------------------------------------------------------------------
-# CORRECT async wrappers — use asyncio.to_thread() to avoid blocking the loop
+# CORRECT async wrappers — to_thread() for I/O-bound work only
 # ---------------------------------------------------------------------------
+# to_thread() releases the GIL during I/O waits (network, disk, sleep),
+# so these wrappers genuinely unblock the event loop.
+# CPU-bound work (like _slow_hash_password) is NOT wrapped here because
+# to_thread() would still hold the GIL and block the event loop.
 
 async def async_db_query(user_id: int) -> dict:
-    """Correct: offloads slow DB call to a thread."""
+    """Correct: offloads I/O-bound DB call to a thread."""
     return await asyncio.to_thread(_slow_db_query, user_id)
 
 
-async def async_hash_password(password: str) -> str:
-    """Correct: offloads CPU-heavy hashing to a thread."""
-    return await asyncio.to_thread(_slow_hash_password, password)
-
-
 async def async_write_log(message: str) -> None:
-    """Correct: offloads blocking file write to a thread."""
+    """Correct: offloads I/O-bound file write to a thread."""
     await asyncio.to_thread(_slow_write_log, message)
 
 
 async def async_http_call(url: str) -> dict:
-    """Correct: offloads blocking HTTP to a thread (real fix: use httpx/aiohttp)."""
+    """Correct: offloads I/O-bound HTTP to a thread (real fix: use httpx/aiohttp)."""
     return await asyncio.to_thread(_slow_http_call, url)
 
 
@@ -138,9 +143,9 @@ async def handle_login(user_id: int, password: str) -> dict:
     await async_write_log(f"login start: {user_id}")
 
     # BUG: blocking calls directly on the event loop
-    user = _slow_db_query(user_id)             # BUG: should use async_db_query
-    hashed = _slow_hash_password(password)      # BUG: should use async_hash_password
-    _slow_write_log(f"login success: {user_id}")  # BUG: should use async_write_log
+    user = _slow_db_query(user_id)             # BUG: I/O-bound, should use async_db_query
+    hashed = _slow_hash_password(password)      # BUG: CPU-bound, to_thread won't help (GIL)
+    _slow_write_log(f"login success: {user_id}")  # BUG: I/O-bound, should use async_write_log
     return {"user": user["name"], "token": hashed[:16], "valid_email": valid}
 
 
@@ -208,8 +213,8 @@ async def simulate_requests() -> None:
 
 async def main() -> None:
     print("=== Simulated FastAPI server (with blocking bugs) ===")
-    print("FLAGGED:     _slow_db_query, _slow_hash_password, _slow_write_log, _slow_http_call")
-    print("NOT FLAGGED: quick_* (fast sync), async_* (to_thread), handle_healthcheck, handle_search\n")
+    print("FLAGGED:     _slow_db_query, _slow_hash_password (CPU, GIL), _slow_write_log, _slow_http_call")
+    print("NOT FLAGGED: quick_* (fast sync), async_db_query/async_write_log/async_http_call (to_thread, I/O)\n")
     await simulate_requests()
 
 

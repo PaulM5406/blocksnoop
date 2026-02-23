@@ -43,24 +43,25 @@ def test_json_schema(io_result):
         assert isinstance(event["duration_ms"], (int, float))
         assert isinstance(event["pid"], int)
         assert isinstance(event["tid"], int)
-        assert "python_stack" in event
+        assert "python_stacks" in event
 
 
 def test_stack_contains_blocking_function(io_result):
     """At least one event's stack should reference blocking_io."""
     stacks_with_match = []
     for event in io_result.events:
-        stack = event.get("python_stack")
-        if stack is None:
+        stacks = event.get("python_stacks")
+        if not stacks:
             continue
-        for frame in stack:
-            if "blocking_io" in frame.get("function", "") or "blocking_io" in frame.get(
-                "file", ""
-            ):
-                stacks_with_match.append(event)
-                break
+        for stack in stacks:
+            for frame in stack:
+                if "blocking_io" in frame.get(
+                    "function", ""
+                ) or "blocking_io" in frame.get("file", ""):
+                    stacks_with_match.append(event)
+                    break
 
-    if not any(e.get("python_stack") for e in io_result.events):
+    if not any(e.get("python_stacks") for e in io_result.events):
         pytest.skip("No stacks captured in this run")
 
     assert len(stacks_with_match) > 0, "No stack referenced blocking_io"

@@ -8,20 +8,23 @@ import sys
 import typing
 from datetime import datetime, timezone
 
+from blocksnoop.core import STDLIB_FRAME_PREFIXES
+
 # ANSI escape codes
 _RESET = "\033[0m"
 _YELLOW = "\033[33m"
 _RED = "\033[31m"
 _DIM = "\033[2m"
 
-# Stdlib modules whose frames are noise in console stack traces.
-# They are kept in JSON sinks for completeness.
-_HIDDEN_PREFIXES = ("asyncio/", "selectors.py", "threading.py")
+
+_DEFAULT_ERROR_THRESHOLD_MS = 500.0
 
 
-def _level_for_duration(duration_ms: float) -> str:
+def _level_for_duration(
+    duration_ms: float, error_threshold_ms: float = _DEFAULT_ERROR_THRESHOLD_MS
+) -> str:
     """Classify severity based on blocking duration."""
-    return "error" if duration_ms >= 500 else "warning"
+    return "error" if duration_ms >= error_threshold_ms else "warning"
 
 
 class Sink(typing.Protocol):
@@ -41,17 +44,22 @@ class ConsoleSink:
     """Human-readable output to a stream (default: stderr) with optional ANSI colors."""
 
     def __init__(
-        self, stream: typing.TextIO | None = None, *, color: bool | None = None
+        self,
+        stream: typing.TextIO | None = None,
+        *,
+        color: bool | None = None,
+        error_threshold_ms: float = _DEFAULT_ERROR_THRESHOLD_MS,
     ) -> None:
         self._stream = stream or sys.stderr
         if color is None:
             self._color = hasattr(self._stream, "isatty") and self._stream.isatty()
         else:
             self._color = color
+        self._error_threshold_ms = error_threshold_ms
 
     def emit(self, record: dict) -> None:
         duration_ms = record["duration_ms"]
-        level = _level_for_duration(duration_ms)
+        level = _level_for_duration(duration_ms, self._error_threshold_ms)
 
         header = (
             f"[{record['timestamp_s']:7.2f}s] #{record['event_number']:<3} BLOCKED  "
@@ -64,27 +72,33 @@ class ConsoleSink:
 
         self._stream.write(header + "\n")
 
-        stack = record.get("python_stack")
-        if stack:
-            # Filter out asyncio/stdlib internals for readability
-            app_frames = [
-                f
-                for f in stack
-                if not any(f["file"].startswith(p) for p in _HIDDEN_PREFIXES)
-            ]
-            frames_to_show = app_frames if app_frames else stack
-            self._stream.write("  Python stack (most recent call last):\n")
-            for frame in frames_to_show:
-                line = f"    {frame['file']}:{frame['line']} in {frame['function']}"
-                if self._color:
-                    line = f"{_DIM}{line}{_RESET}"
-                self._stream.write(line + "\n")
-            if len(frames_to_show) < len(stack):
-                hidden = len(stack) - len(frames_to_show)
-                note = f"    ... {hidden} asyncio/stdlib frames hidden"
-                if self._color:
-                    note = f"{_DIM}{note}{_RESET}"
-                self._stream.write(note + "\n")
+        stacks = record.get("python_stacks")
+        if stacks:
+            for i, stack in enumerate(stacks):
+                # Filter out asyncio/stdlib internals for readability.
+                # Use ``in`` so both relative ("asyncio/events.py") and absolute
+                # ("/usr/lib/python3.13/asyncio/events.py") paths are matched.
+                app_frames = [
+                    f
+                    for f in stack
+                    if not any(p in f["file"] for p in STDLIB_FRAME_PREFIXES)
+                ]
+                frames_to_show = app_frames if app_frames else stack
+                if i == 0:
+                    self._stream.write("  Python stack (most recent call last):\n")
+                else:
+                    self._stream.write("  ---\n")
+                for frame in frames_to_show:
+                    line = f"    {frame['file']}:{frame['line']} in {frame['function']}"
+                    if self._color:
+                        line = f"{_DIM}{line}{_RESET}"
+                    self._stream.write(line + "\n")
+                if len(frames_to_show) < len(stack):
+                    hidden = len(stack) - len(frames_to_show)
+                    note = f"    ... {hidden} asyncio/stdlib frames hidden"
+                    if self._color:
+                        note = f"{_DIM}{note}{_RESET}"
+                    self._stream.write(note + "\n")
             self._stream.write("\n")
         else:
             self._stream.write("  (no Python stack captured)\n")
@@ -101,11 +115,22 @@ class ConsoleSink:
 class JsonStreamSink:
     """JSON lines to a stream (default: stdout), backward compatible with --json."""
 
-    def __init__(self, stream: typing.TextIO | None = None) -> None:
+    def __init__(
+        self,
+        stream: typing.TextIO | None = None,
+        *,
+        error_threshold_ms: float = _DEFAULT_ERROR_THRESHOLD_MS,
+    ) -> None:
         self._stream = stream or sys.stdout
+        self._error_threshold_ms = error_threshold_ms
 
     def emit(self, record: dict) -> None:
-        output = {**record, "level": _level_for_duration(record["duration_ms"])}
+        output = {
+            **record,
+            "level": _level_for_duration(
+                record["duration_ms"], self._error_threshold_ms
+            ),
+        }
         self._stream.write(json.dumps(output) + "\n")
         self._stream.flush()
 
@@ -120,16 +145,22 @@ class JsonFileSink:
     """Structured JSON lines to a file for log aggregators (Datadog/Fluentd/CloudWatch)."""
 
     def __init__(
-        self, path: str, *, service: str = "blocksnoop", env: str = ""
+        self,
+        path: str,
+        *,
+        service: str = "blocksnoop",
+        env: str = "",
+        error_threshold_ms: float = _DEFAULT_ERROR_THRESHOLD_MS,
     ) -> None:
         self._service = service
         self._env = env
+        self._error_threshold_ms = error_threshold_ms
         self._handler = logging.FileHandler(path)
         self._handler.setFormatter(logging.Formatter("%(message)s"))
 
     def emit(self, record: dict) -> None:
         duration_ms = record["duration_ms"]
-        level = _level_for_duration(duration_ms)
+        level = _level_for_duration(duration_ms, self._error_threshold_ms)
 
         output = {
             "timestamp": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%fZ"),
@@ -141,7 +172,7 @@ class JsonFileSink:
             "event_number": record["event_number"],
             "pid": record["pid"],
             "tid": record["tid"],
-            "python_stack": record.get("python_stack"),
+            "python_stacks": record.get("python_stacks"),
             "dd": {"service": self._service, "env": self._env},
         }
 

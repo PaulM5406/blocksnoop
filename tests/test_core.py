@@ -31,9 +31,22 @@ def test_blocking_event_duration_ms():
     assert event.duration_ms == 150.0
 
 
-def test_blocking_event_no_stack():
+def test_blocking_event_no_stacks():
     event = BlockingEvent(start_ns=0, end_ns=1_000_000, pid=1, tid=1)
-    assert event.python_stack is None
+    assert event.python_stacks == ()
+
+
+def test_blocking_event_with_stacks():
+    stack = PythonStackTrace(
+        thread_id=1,
+        thread_name="main",
+        frames=(StackFrame(function="f", file="f.py", line=1),),
+    )
+    event = BlockingEvent(
+        start_ns=0, end_ns=1_000_000, pid=1, tid=1, python_stacks=(stack,)
+    )
+    assert len(event.python_stacks) == 1
+    assert event.python_stacks[0].frames[0].function == "f"
 
 
 def test_detector_config_defaults():
@@ -45,3 +58,13 @@ def test_detector_config_defaults():
 def test_detector_config_custom_tid():
     config = DetectorConfig(pid=1234, tid=5678)
     assert config.tid == 5678
+
+
+def test_detector_config_correlation_padding_default():
+    config = DetectorConfig(pid=1234)
+    assert config.correlation_padding_ms == 200.0
+
+
+def test_detector_config_correlation_padding_custom():
+    config = DetectorConfig(pid=1234, correlation_padding_ms=50.0)
+    assert config.correlation_padding_ms == 50.0

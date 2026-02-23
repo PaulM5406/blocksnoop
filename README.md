@@ -1,15 +1,15 @@
 # blocksnoop
 
-Detect blocking calls in Python asyncio event loops using eBPF + py-spy.
+Detect blocking calls in Python asyncio event loops using eBPF + Austin.
 
 blocksnoop attaches to a running Python process (or launches one) and reports every time the event loop is blocked longer than a configurable threshold — with the Python stack trace that caused it.
 
 ## How it works
 
 ```
-eBPF (kernel)          py-spy (userspace)
+eBPF (kernel)          Austin (userspace)
   │ monitors               │ samples Python
-  │ epoll gaps              │ stacks periodically
+  │ epoll gaps              │ stacks continuously
   └──────────┐   ┌─────────┘
              ▼   ▼
           Correlator
@@ -19,16 +19,17 @@ eBPF (kernel)          py-spy (userspace)
 ```
 
 1. An **eBPF probe** hooks `epoll_wait` syscalls and measures the time between returns (callback start) and the next entry (callback end). If the gap exceeds the threshold, it emits an event.
-2. A **py-spy sampler** runs in a background thread, periodically capturing Python stack traces into a ring buffer.
+2. A **stack sampler** ([Austin](https://github.com/P403n1x87/austin)) runs as a long-lived subprocess, continuously streaming Python stack traces into a ring buffer. Austin's pipe mode avoids per-sample subprocess overhead, enabling sub-10ms threshold detection.
 3. The **correlator** enriches each blocking event with the closest matching Python stack.
 4. The **reporter** fans out events to one or more output sinks.
 
 ## Requirements
 
 - Linux with eBPF support (kernel 4.15+)
-- Root privileges (for eBPF and py-spy)
+- Root privileges (for eBPF and Austin)
 - [BCC (BPF Compiler Collection)](https://github.com/iovisor/bcc)
-- [py-spy](https://github.com/benfred/py-spy)
+- [Austin](https://github.com/P403n1x87/austin)
+- [austin-python](https://github.com/P403n1x87/austin-python) (installed automatically as a dependency)
 - Python 3.12+
 
 ## Installation
@@ -53,6 +54,7 @@ uv sync --all-extras --dev
 sudo blocksnoop <PID>
 sudo blocksnoop -t 50 <PID>          # 50ms threshold (default: 100ms)
 sudo blocksnoop --tid 1234 <PID>     # monitor specific thread
+sudo blocksnoop -v <PID>             # enable debug logging
 ```
 
 ### Launch and monitor a process
@@ -101,7 +103,7 @@ Blocking events detected: 2
 JSON (`--json`):
 
 ```json
-{"event_number": 1, "timestamp_s": 1.23, "duration_ms": 302.1, "pid": 5678, "tid": 1234, "python_stack": [{"function": "blocking_io", "file": "app.py", "line": 7}, {"function": "main", "file": "app.py", "line": 13}], "level": "warning"}
+{"event_number": 1, "timestamp_s": 1.23, "duration_ms": 302.1, "pid": 5678, "tid": 1234, "python_stacks": [[{"function": "blocking_io", "file": "app.py", "line": 7}, {"function": "main", "file": "app.py", "line": 13}]], "level": "warning"}
 ```
 
 ### CLI reference
@@ -110,13 +112,16 @@ JSON (`--json`):
 blocksnoop [OPTIONS] [PID] [-- COMMAND ...]
 
 Options:
-  -t, --threshold FLOAT   Blocking threshold in ms (default: 100)
-  --tid INT               Thread ID to monitor (default: main thread)
-  --json                  JSON lines output to stdout
-  --log-file PATH         Write structured JSON to file for log aggregators
-  --service NAME          Service name for structured logs (default: blocksnoop)
-  --env ENV               Environment tag for structured logs
-  --no-color              Disable ANSI colors in terminal output
+  -t, --threshold FLOAT        Blocking threshold in ms (default: 100)
+  --tid INT                    Thread ID to monitor (default: main thread)
+  --json                       JSON lines output to stdout
+  --log-file PATH              Write structured JSON to file for log aggregators
+  --service NAME               Service name for structured logs (default: blocksnoop)
+  --env ENV                    Environment tag for structured logs
+  --no-color                   Disable ANSI colors in terminal output
+  -v, --verbose                Enable debug logging to stderr
+  --error-threshold MS         Duration in ms above which events are errors (default: 500)
+  --correlation-padding MS     Correlation time window padding in ms (default: 200)
 ```
 
 ## Docker
@@ -253,4 +258,4 @@ ty check blocksnoop/
 
 ## License
 
-GPL-3.0 — see [LICENSE](LICENSE) for details.
+GPL-3.0-or-later (due to the [austin-python](https://github.com/P403n1x87/austin-python) dependency)

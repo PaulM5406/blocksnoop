@@ -3,11 +3,14 @@
 from __future__ import annotations
 
 import ctypes
+import logging
 import os
 import threading
-from typing import Callable
+from collections.abc import Callable
 
 from blocksnoop.core import BlockingEvent, DetectorConfig
+
+_logger = logging.getLogger("blocksnoop.detector")
 
 
 # Preferred order: epoll_wait is simplest (no sigset_t), then epoll_pwait, then epoll_pwait2.
@@ -54,6 +57,7 @@ class EbpfDetector:
 
         threshold_ns = int(config.threshold_ms * 1_000_000)
         epoll_syscall = _detect_epoll_syscall()
+        _logger.debug("Using epoll syscall: %s", epoll_syscall)
         source = source.replace("__TARGET_TGID__", str(config.pid))
         source = source.replace("__THRESHOLD_NS__", str(threshold_ns))
         source = source.replace("__EPOLL_SYSCALL__", epoll_syscall)
@@ -64,6 +68,7 @@ class EbpfDetector:
 
         self._bpf = BPF(text=source)
         self._bpf["events"].open_perf_buffer(self._handle_event)
+        _logger.debug("BPF program loaded, perf buffer open")
 
     def start(self) -> None:
         self._stop_event.clear()
@@ -87,6 +92,11 @@ class EbpfDetector:
             end_ns=event.end_ns,
             pid=event.pid,
             tid=event.tid,
-            python_stack=None,
+            python_stacks=(),
+        )
+        _logger.debug(
+            "Blocking event: tid=%d duration=%.1fms",
+            event.tid,
+            blocking_event.duration_ms,
         )
         self._callback(blocking_event)

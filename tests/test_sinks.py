@@ -15,11 +15,13 @@ from blocksnoop.sinks import (
 def _make_record(
     duration_ms: float = 200.0, tid: int = 42, with_stack: bool = True
 ) -> dict:
-    stack = None
+    stacks = None
     if with_stack:
-        stack = [
-            {"function": "cpu_heavy", "file": "app.py", "line": 42},
-            {"function": "main", "file": "app.py", "line": 30},
+        stacks = [
+            [
+                {"function": "cpu_heavy", "file": "app.py", "line": 42},
+                {"function": "main", "file": "app.py", "line": 30},
+            ]
         ]
     return {
         "event_number": 1,
@@ -27,7 +29,7 @@ def _make_record(
         "duration_ms": duration_ms,
         "pid": 100,
         "tid": tid,
-        "python_stack": stack,
+        "python_stacks": stacks,
     }
 
 
@@ -46,6 +48,14 @@ def test_level_warning():
 def test_level_error():
     assert _level_for_duration(500.0) == "error"
     assert _level_for_duration(1000.0) == "error"
+
+
+def test_level_custom_threshold_warning():
+    assert _level_for_duration(250.0, error_threshold_ms=300.0) == "warning"
+
+
+def test_level_custom_threshold_error():
+    assert _level_for_duration(350.0, error_threshold_ms=300.0) == "error"
 
 
 # --- ConsoleSink ---
@@ -78,6 +88,28 @@ def test_console_emit_blank_line_between_stacks():
     output = buf.getvalue()
     # Events with stacks end with a blank line
     assert output.endswith("\n\n")
+
+
+def test_console_emit_multiple_stacks():
+    """Multiple unique stacks are separated by '---'."""
+    record = _make_record()
+    record["python_stacks"] = [
+        [
+            {"function": "db_query", "file": "app.py", "line": 10},
+            {"function": "handle_login", "file": "app.py", "line": 5},
+        ],
+        [
+            {"function": "hash_password", "file": "app.py", "line": 20},
+            {"function": "handle_login", "file": "app.py", "line": 6},
+        ],
+    ]
+    buf = StringIO()
+    sink = ConsoleSink(stream=buf, color=False)
+    sink.emit(record)
+    output = buf.getvalue()
+    assert "db_query" in output
+    assert "hash_password" in output
+    assert "---" in output
 
 
 def test_console_summary():
@@ -117,13 +149,15 @@ def test_console_color_dim_stack():
 def test_console_hides_asyncio_frames():
     """asyncio/stdlib frames are hidden from console output."""
     record = _make_record()
-    record["python_stack"] = [
-        {"function": "blocking_io", "file": "app.py", "line": 7},
-        {"function": "main", "file": "app.py", "line": 13},
-        {"function": "_run", "file": "asyncio/events.py", "line": 89},
-        {"function": "_run_once", "file": "asyncio/base_events.py", "line": 2050},
-        {"function": "run_forever", "file": "asyncio/base_events.py", "line": 683},
-        {"function": "select", "file": "selectors.py", "line": 452},
+    record["python_stacks"] = [
+        [
+            {"function": "blocking_io", "file": "app.py", "line": 7},
+            {"function": "main", "file": "app.py", "line": 13},
+            {"function": "_run", "file": "asyncio/events.py", "line": 89},
+            {"function": "_run_once", "file": "asyncio/base_events.py", "line": 2050},
+            {"function": "run_forever", "file": "asyncio/base_events.py", "line": 683},
+            {"function": "select", "file": "selectors.py", "line": 452},
+        ]
     ]
     buf = StringIO()
     sink = ConsoleSink(stream=buf, color=False)
@@ -136,12 +170,48 @@ def test_console_hides_asyncio_frames():
     assert "4 asyncio/stdlib frames hidden" in output
 
 
+def test_console_hides_asyncio_frames_absolute_paths():
+    """asyncio/stdlib frames with absolute paths are also hidden."""
+    record = _make_record()
+    record["python_stacks"] = [
+        [
+            {"function": "blocking_io", "file": "/app/myapp.py", "line": 7},
+            {
+                "function": "_run",
+                "file": "/usr/local/lib/python3.13/asyncio/events.py",
+                "line": 89,
+            },
+            {
+                "function": "_run_once",
+                "file": "/usr/local/lib/python3.13/asyncio/base_events.py",
+                "line": 2050,
+            },
+            {
+                "function": "select",
+                "file": "/usr/local/lib/python3.13/selectors.py",
+                "line": 452,
+            },
+        ]
+    ]
+    buf = StringIO()
+    sink = ConsoleSink(stream=buf, color=False)
+    sink.emit(record)
+    output = buf.getvalue()
+    assert "blocking_io" in output
+    assert "asyncio/events.py" not in output
+    assert "asyncio/base_events.py" not in output
+    assert "selectors.py:452" not in output
+    assert "3 asyncio/stdlib frames hidden" in output
+
+
 def test_console_shows_all_if_only_stdlib():
     """If all frames are stdlib, show them anyway (don't hide everything)."""
     record = _make_record()
-    record["python_stack"] = [
-        {"function": "select", "file": "selectors.py", "line": 452},
-        {"function": "_run_once", "file": "asyncio/base_events.py", "line": 2050},
+    record["python_stacks"] = [
+        [
+            {"function": "select", "file": "selectors.py", "line": 452},
+            {"function": "_run_once", "file": "asyncio/base_events.py", "line": 2050},
+        ]
     ]
     buf = StringIO()
     sink = ConsoleSink(stream=buf, color=False)
@@ -164,7 +234,7 @@ def test_json_stream_emit():
     assert record["duration_ms"] == 250.0
     assert record["tid"] == 7
     assert record["pid"] == 100
-    assert record["python_stack"] is not None
+    assert record["python_stacks"] is not None
 
 
 def test_json_stream_level_present():
@@ -184,7 +254,7 @@ def test_json_stream_level_error():
 
 
 def test_json_stream_backward_compatible_schema():
-    """Verify all fields from the original --json schema are present."""
+    """Verify all fields from the JSON schema are present."""
     buf = StringIO()
     sink = JsonStreamSink(stream=buf)
     sink.emit(_make_record())
@@ -195,7 +265,7 @@ def test_json_stream_backward_compatible_schema():
         "duration_ms",
         "pid",
         "tid",
-        "python_stack",
+        "python_stacks",
     ):
         assert key in record
 

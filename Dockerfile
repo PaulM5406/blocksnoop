@@ -1,17 +1,29 @@
-FROM python:3.13-bookworm
+FROM python:3.12-bookworm
 
-# BCC dependencies + py-spy
+# BCC dependencies + Austin
 RUN apt-get update && apt-get install -y \
-    bpfcc-tools python3-bpfcc linux-headers-generic \
-    && pip install py-spy \
+    bpfcc-tools python3-bpfcc linux-headers-generic curl xz-utils \
     && rm -rf /var/lib/apt/lists/*
 
-# Make system-installed bcc visible to Python 3.13
+# Install Austin binary from GitHub releases
+ARG AUSTIN_VERSION=4.0.0
+RUN DPKG_ARCH=$(dpkg --print-architecture) && \
+    case "$DPKG_ARCH" in \
+      arm64) AUSTIN_ARCH="aarch64" ;; \
+      *)     AUSTIN_ARCH="$DPKG_ARCH" ;; \
+    esac && \
+    curl -fsSL "https://github.com/P403n1x87/austin/releases/download/v${AUSTIN_VERSION}/austin-${AUSTIN_VERSION}-gnu-linux-${AUSTIN_ARCH}.tar.xz" \
+    | tar -xJ -C /usr/local/bin
+
+# Make system-installed bcc visible to the venv Python
 ENV PYTHONPATH="/usr/lib/python3/dist-packages:${PYTHONPATH}"
+
+COPY --from=ghcr.io/astral-sh/uv:latest /uv /usr/local/bin/uv
 
 WORKDIR /app
 COPY . .
-RUN pip install -e ".[dev]"
+RUN UV_PROJECT_ENVIRONMENT=/opt/venv uv sync --all-extras --dev
+ENV PATH="/opt/venv/bin:$PATH"
 
 COPY docker-entrypoint.sh /usr/local/bin/
 ENTRYPOINT ["docker-entrypoint.sh"]

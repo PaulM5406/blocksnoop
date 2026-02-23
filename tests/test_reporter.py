@@ -11,18 +11,20 @@ from blocksnoop.sinks import ConsoleSink, JsonStreamSink
 def _make_event(
     duration_ns: int = 200_000_000, tid: int = 42, with_stack: bool = True
 ) -> BlockingEvent:
-    stack = None
+    stacks: tuple[PythonStackTrace, ...] = ()
     if with_stack:
-        stack = PythonStackTrace(
-            thread_id=tid,
-            thread_name="MainThread",
-            frames=(
-                StackFrame(function="cpu_heavy", file="app.py", line=42),
-                StackFrame(function="main", file="app.py", line=30),
+        stacks = (
+            PythonStackTrace(
+                thread_id=tid,
+                thread_name="MainThread",
+                frames=(
+                    StackFrame(function="cpu_heavy", file="app.py", line=42),
+                    StackFrame(function="main", file="app.py", line=30),
+                ),
             ),
         )
     return BlockingEvent(
-        start_ns=0, end_ns=duration_ns, pid=100, tid=tid, python_stack=stack
+        start_ns=0, end_ns=duration_ns, pid=100, tid=tid, python_stacks=stacks
     )
 
 
@@ -62,9 +64,10 @@ def test_json_mode_output():
     assert record["duration_ms"] == 150.0
     assert record["pid"] == 100
     assert record["tid"] == 7
-    assert isinstance(record["python_stack"], list)
-    assert len(record["python_stack"]) == 2
-    assert record["python_stack"][0]["function"] == "cpu_heavy"
+    assert isinstance(record["python_stacks"], list)
+    assert len(record["python_stacks"]) == 1
+    assert len(record["python_stacks"][0]) == 2
+    assert record["python_stacks"][0][0]["function"] == "cpu_heavy"
     assert "level" in record
 
 

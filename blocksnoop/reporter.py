@@ -20,11 +20,14 @@ class Reporter:
         self._event_count += 1
         elapsed_s = time.monotonic() - self._start_time
 
-        python_stack = None
-        if event.python_stack is not None:
-            python_stack = [
-                {"function": frame.function, "file": frame.file, "line": frame.line}
-                for frame in event.python_stack.frames
+        python_stacks: list[list[dict]] | None = None
+        if event.python_stacks:
+            python_stacks = [
+                [
+                    {"function": f.function, "file": f.file, "line": f.line}
+                    for f in stack.frames
+                ]
+                for stack in event.python_stacks
             ]
 
         record = {
@@ -33,7 +36,7 @@ class Reporter:
             "duration_ms": round(event.duration_ms, 3),
             "pid": event.pid,
             "tid": event.tid,
-            "python_stack": python_stack,
+            "python_stacks": python_stacks,
         }
 
         for sink in self._sinks:
