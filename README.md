@@ -128,6 +128,19 @@ Options:
 
 blocksnoop requires kernel access, so Docker containers need `--privileged` and `--pid=host`:
 
+```bash
+# Pull from Docker Hub
+docker pull oloapm/blocksnoop
+
+# Attach to a process on the host
+docker run --rm --privileged --pid=host oloapm/blocksnoop blocksnoop -t 100 <PID>
+
+# Launch and monitor a process
+docker run --rm --privileged --pid=host oloapm/blocksnoop blocksnoop -t 100 -- python app.py
+```
+
+For local development:
+
 ```yaml
 # docker-compose.yml
 services:
@@ -155,7 +168,7 @@ kubectl get pods -l app=my-api
 
 # Attach an ephemeral debug container with the required privileges
 kubectl debug -it my-api-pod-7b8c9d \
-  --image=blocksnoop:latest \
+  --image=oloapm/blocksnoop:latest \
   --target=my-api \
   -- sh
 ```
@@ -198,7 +211,7 @@ spec:
       hostPID: true
       containers:
         - name: blocksnoop
-          image: blocksnoop:latest
+          image: oloapm/blocksnoop:latest
           command: ["blocksnoop", "--json", "--log-file", "/var/log/blocksnoop/events.json", "--service", "my-api", "--env", "production", "-t", "100"]
           securityContext:
             privileged: true

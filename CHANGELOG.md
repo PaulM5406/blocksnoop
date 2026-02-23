@@ -1,5 +1,17 @@
 # Changelog
 
+## [Unreleased]
+
+### Added
+
+- Docker Hub publishing in release workflow (multi-arch: amd64, arm64) as `oloapm/blocksnoop`
+- `.dockerignore` to reduce Docker build context size
+
+### Changed
+
+- Dockerfile optimized for production (no dev dependencies)
+- README Kubernetes examples now reference `oloapm/blocksnoop` Docker Hub image
+
 ## [v0.1.0] - 2026-02-23
 
 ### Changed
