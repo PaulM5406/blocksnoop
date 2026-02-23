@@ -9,9 +9,9 @@ pytestmark = pytest.mark.docker
 
 
 def test_no_args_shows_error(docker_image):
-    """Running loopspy with no arguments should fail with usage info."""
+    """Running blocksnoop with no arguments should fail with usage info."""
     proc = subprocess.run(
-        ["docker", "compose", "run", "--rm", "loopspy", "loopspy"],
+        ["docker", "compose", "run", "--rm", "blocksnoop", "blocksnoop"],
         capture_output=True,
         text=True,
         timeout=30,
@@ -29,11 +29,11 @@ def test_human_readable_output(docker_image):
             "compose",
             "run",
             "--rm",
-            "loopspy",
+            "blocksnoop",
             "timeout",
             "--signal=TERM",
             "8",
-            "loopspy",
+            "blocksnoop",
             "-t",
             "100",
             "--",
@@ -57,13 +57,13 @@ def test_log_file_output(docker_image):
             "compose",
             "run",
             "--rm",
-            "loopspy",
+            "blocksnoop",
             "sh",
             "-c",
             "timeout --signal=TERM 8 "
-            "loopspy --log-file /tmp/loopspy_test.json --service test-svc --env ci "
+            "blocksnoop --log-file /tmp/blocksnoop_test.json --service test-svc --env ci "
             "-t 100 -- python tests/fixtures/blocking_io.py; "
-            "cat /tmp/loopspy_test.json",
+            "cat /tmp/blocksnoop_test.json",
         ],
         capture_output=True,
         text=True,
@@ -79,6 +79,6 @@ def test_log_file_output(docker_image):
         record = json.loads(line)
         assert "timestamp" in record
         assert "level" in record
-        assert record["source"] == "loopspy"
+        assert record["source"] == "blocksnoop"
         assert record["dd"]["service"] == "test-svc"
         assert record["dd"]["env"] == "ci"

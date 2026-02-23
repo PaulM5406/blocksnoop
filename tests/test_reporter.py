@@ -1,11 +1,11 @@
-"""Unit tests for loopspy.reporter (no root, eBPF, or py-spy required)."""
+"""Unit tests for blocksnoop.reporter (no root, eBPF, or py-spy required)."""
 
 import json
 from io import StringIO
 
-from loopspy.core import BlockingEvent, PythonStackTrace, StackFrame
-from loopspy.reporter import Reporter
-from loopspy.sinks import ConsoleSink, JsonStreamSink
+from blocksnoop.core import BlockingEvent, PythonStackTrace, StackFrame
+from blocksnoop.reporter import Reporter
+from blocksnoop.sinks import ConsoleSink, JsonStreamSink
 
 
 def _make_event(

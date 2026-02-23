@@ -2,7 +2,7 @@
 
 import pytest
 
-from tests.integration.conftest import run_loopspy_docker
+from tests.integration.conftest import run_blocksnoop_docker
 
 pytestmark = pytest.mark.docker
 
@@ -11,20 +11,20 @@ FIXTURE = "tests/fixtures/blocking_cpu.py"
 
 @pytest.fixture(scope="module")
 def cpu_result(docker_image):
-    return run_loopspy_docker(FIXTURE, timeout_s=10, threshold_ms=100)
+    return run_blocksnoop_docker(FIXTURE, timeout_s=10, threshold_ms=100)
 
 
 def test_detects_cpu_blocking(cpu_result):
-    assert len(cpu_result.events) >= 1, (
-        f"Expected at least 1 event, got {len(cpu_result.events)}"
-    )
+    assert (
+        len(cpu_result.events) >= 1
+    ), f"Expected at least 1 event, got {len(cpu_result.events)}"
 
 
 def test_duration_above_threshold(cpu_result):
     for event in cpu_result.events:
-        assert event["duration_ms"] >= 100, (
-            f"Event duration {event['duration_ms']}ms below 100ms threshold"
-        )
+        assert (
+            event["duration_ms"] >= 100
+        ), f"Event duration {event['duration_ms']}ms below 100ms threshold"
 
 
 def test_stack_contains_cpu_heavy(cpu_result):
@@ -35,7 +35,9 @@ def test_stack_contains_cpu_heavy(cpu_result):
         if stack is None:
             continue
         for frame in stack:
-            if "cpu_heavy" in frame.get("function", "") or "cpu_heavy" in frame.get("file", ""):
+            if "cpu_heavy" in frame.get("function", "") or "cpu_heavy" in frame.get(
+                "file", ""
+            ):
                 stacks_with_match.append(event)
                 break
 

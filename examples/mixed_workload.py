@@ -4,10 +4,10 @@ Example: Async workers with a mix of correct and incorrect patterns.
 Each worker demonstrates three categories:
   - FAST SYNC: quick in-memory ops (SQLite, JSON, regex) — not flagged
   - ASYNC: properly non-blocking (to_thread, gather, async sleep) — not flagged
-  - SLOW SYNC (BUG): blocking calls on the event loop — FLAGGED by loopspy
+  - SLOW SYNC (BUG): blocking calls on the event loop — FLAGGED by blocksnoop
 
 Run with:
-    docker compose run --rm loopspy loopspy -t 50 -- python examples/mixed_workload.py
+    docker compose run --rm blocksnoop blocksnoop -t 50 -- python examples/mixed_workload.py
 """
 
 import asyncio
@@ -69,7 +69,7 @@ async def async_notify(channel: str, message: str) -> None:
 
 
 # ---------------------------------------------------------------------------
-# FAST SYNC: real sync code that is fast enough to NOT trigger loopspy
+# FAST SYNC: real sync code that is fast enough to NOT trigger blocksnoop
 # ---------------------------------------------------------------------------
 
 _db = sqlite3.connect(":memory:")
@@ -111,7 +111,7 @@ def quick_write_temp_file(content: str) -> str:
 
 
 # ---------------------------------------------------------------------------
-# SLOW SYNC: blocking operations that SHOULD be caught by loopspy
+# SLOW SYNC: blocking operations that SHOULD be caught by blocksnoop
 # ---------------------------------------------------------------------------
 
 

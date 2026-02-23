@@ -1,11 +1,13 @@
-"""Unit tests for loopspy.profiler (no root, eBPF, or py-spy required)."""
+"""Unit tests for blocksnoop.profiler (no root, eBPF, or py-spy required)."""
 
 from unittest.mock import patch
 
-import pytest
-
-from loopspy.core import PythonStackTrace, StackFrame
-from loopspy.profiler import StackRingBuffer, _parse_pyspy_output, check_pyspy_available
+from blocksnoop.core import PythonStackTrace, StackFrame
+from blocksnoop.profiler import (
+    StackRingBuffer,
+    _parse_pyspy_output,
+    check_pyspy_available,
+)
 
 RAW_PYSPY_OUTPUT = """\
 Thread 12345 (active): "MainThread"

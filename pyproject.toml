@@ -3,7 +3,7 @@ requires = ["setuptools>=68.0"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "loopspy"
+name = "blocksnoop"
 version = "0.1.0"
 description = "Detect blocking calls in asyncio event loops using eBPF + py-spy"
 readme = "README.md"
@@ -22,12 +22,12 @@ classifiers = [
 ]
 
 [project.urls]
-Homepage = "https://github.com/PaulM5406/loopspy"
-Repository = "https://github.com/PaulM5406/loopspy"
-Issues = "https://github.com/PaulM5406/loopspy/issues"
+Homepage = "https://github.com/PaulM5406/blocksnoop"
+Repository = "https://github.com/PaulM5406/blocksnoop"
+Issues = "https://github.com/PaulM5406/blocksnoop/issues"
 
 [project.scripts]
-loopspy = "loopspy.cli:main"
+blocksnoop = "blocksnoop.cli:main"
 
 [project.optional-dependencies]
 dev = ["ruff", "ty", "pytest"]

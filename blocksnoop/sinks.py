@@ -1,4 +1,4 @@
-"""Output sinks for loopspy — console, JSON stream, and JSON file."""
+"""Output sinks for blocksnoop — console, JSON stream, and JSON file."""
 
 from __future__ import annotations
 
@@ -90,7 +90,7 @@ class ConsoleSink:
             self._stream.write("  (no Python stack captured)\n")
 
     def emit_summary(self, summary: dict) -> None:
-        self._stream.write("--- loopspy session ---\n")
+        self._stream.write("--- blocksnoop session ---\n")
         self._stream.write(f"Duration: {summary['duration_s']:.1f}s\n")
         self._stream.write(f"Blocking events detected: {summary['event_count']}\n")
 
@@ -119,7 +119,9 @@ class JsonStreamSink:
 class JsonFileSink:
     """Structured JSON lines to a file for log aggregators (Datadog/Fluentd/CloudWatch)."""
 
-    def __init__(self, path: str, *, service: str = "loopspy", env: str = "") -> None:
+    def __init__(
+        self, path: str, *, service: str = "blocksnoop", env: str = ""
+    ) -> None:
         self._service = service
         self._env = env
         self._handler = logging.FileHandler(path)
@@ -134,7 +136,7 @@ class JsonFileSink:
             "level": level,
             "message": f"Blocking call detected: {duration_ms:.1f}ms on tid={record['tid']}",
             "service": self._service,
-            "source": "loopspy",
+            "source": "blocksnoop",
             "duration_ms": duration_ms,
             "event_number": record["event_number"],
             "pid": record["pid"],
@@ -144,7 +146,7 @@ class JsonFileSink:
         }
 
         log_record = logging.LogRecord(
-            name="loopspy",
+            name="blocksnoop",
             level=logging.WARNING,
             pathname="",
             lineno=0,
@@ -159,18 +161,18 @@ class JsonFileSink:
             "timestamp": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%fZ"),
             "level": "info",
             "message": (
-                f"loopspy session ended: {summary['event_count']} blocking events "
+                f"blocksnoop session ended: {summary['event_count']} blocking events "
                 f"in {summary['duration_s']:.1f}s"
             ),
             "service": self._service,
-            "source": "loopspy",
+            "source": "blocksnoop",
             "duration_s": summary["duration_s"],
             "event_count": summary["event_count"],
             "dd": {"service": self._service, "env": self._env},
         }
 
         log_record = logging.LogRecord(
-            name="loopspy",
+            name="blocksnoop",
             level=logging.INFO,
             pathname="",
             lineno=0,

@@ -8,9 +8,9 @@ Run the full verification suite. If any check fails, stop and fix the issues bef
 
 ```bash
 uv run --extra dev pytest tests/ -v --ignore=tests/integration
-ruff check loopspy/ tests/
-ruff format --check loopspy/ tests/
-ty check loopspy/
+ruff check blocksnoop/ tests/
+ruff format --check blocksnoop/ tests/
+ty check blocksnoop/
 ```
 
 ## 2. Analyze changes
@@ -32,7 +32,7 @@ Run `git status` (no -uall flag), `git diff --staged`, `git diff`, and `git log 
 Update the version number in both files to match the confirmed version (without the `v` prefix):
 
 - `pyproject.toml` → `version = "X.Y.Z"`
-- `loopspy/__init__.py` → `__version__ = "X.Y.Z"`
+- `blocksnoop/__init__.py` → `__version__ = "X.Y.Z"`
 
 ## 5. Update CHANGELOG.md
 

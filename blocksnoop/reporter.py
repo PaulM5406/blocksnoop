@@ -1,12 +1,12 @@
-"""Reporter module for loopspy — dispatches blocking events to output sinks."""
+"""Reporter module for blocksnoop — dispatches blocking events to output sinks."""
 
 from __future__ import annotations
 
 import time
 from collections.abc import Sequence
 
-from loopspy.core import BlockingEvent
-from loopspy.sinks import ConsoleSink, Sink
+from blocksnoop.core import BlockingEvent
+from blocksnoop.sinks import ConsoleSink, Sink
 
 
 class Reporter:

@@ -1,4 +1,4 @@
-"""Profiler module for loopspy — py-spy based stack sampling."""
+"""Profiler module for blocksnoop — py-spy based stack sampling."""
 
 from __future__ import annotations
 
@@ -10,7 +10,7 @@ import threading
 import time
 from typing import Optional
 
-from loopspy.core import PythonStackTrace, StackFrame
+from blocksnoop.core import PythonStackTrace, StackFrame
 
 
 def check_pyspy_available() -> bool:
@@ -35,7 +35,7 @@ def _parse_pyspy_output(raw: str, tid: int) -> Optional[PythonStackTrace]:
     thread_header = re.compile(
         r'^Thread\s+(\d+)\s+\([^)]*\):\s+"([^"]*)"', re.MULTILINE
     )
-    frame_line = re.compile(r'^\s+(\S+)\s+\(([^:]+):(\d+)\)\s*$')
+    frame_line = re.compile(r"^\s+(\S+)\s+\(([^:]+):(\d+)\)\s*$")
 
     # Split into per-thread blocks by finding header positions
     headers = list(thread_header.finditer(raw))
@@ -60,7 +60,9 @@ def _parse_pyspy_output(raw: str, tid: int) -> Optional[PythonStackTrace]:
     for line in block_text.splitlines():
         m = frame_line.match(line)
         if m:
-            frames.append(StackFrame(function=m.group(1), file=m.group(2), line=int(m.group(3))))
+            frames.append(
+                StackFrame(function=m.group(1), file=m.group(2), line=int(m.group(3)))
+            )
 
     return PythonStackTrace(
         thread_id=thread_id,
@@ -78,7 +80,7 @@ class StackRingBuffer:
     def __init__(self, size: int = 256) -> None:
         self._size = size
         self._buffer: list[Optional[tuple[int, PythonStackTrace]]] = [None] * size
-        self._head = 0   # index of next write position
+        self._head = 0  # index of next write position
         self._count = 0  # number of valid entries
         self._lock = threading.Lock()
 
@@ -140,7 +142,9 @@ class StackRingBuffer:
 class StackSampler:
     """Background daemon thread that periodically samples a process via py-spy."""
 
-    def __init__(self, pid: int, sample_interval_ms: float, tid: Optional[int] = None) -> None:
+    def __init__(
+        self, pid: int, sample_interval_ms: float, tid: Optional[int] = None
+    ) -> None:
         self._pid = pid
         self._tid = tid if tid is not None else pid
         self._interval_s = sample_interval_ms / 1000.0
@@ -153,7 +157,9 @@ class StackSampler:
         if self._thread is not None and self._thread.is_alive():
             return
         self._stop_event.clear()
-        self._thread = threading.Thread(target=self._run, daemon=True, name="loopspy-sampler")
+        self._thread = threading.Thread(
+            target=self._run, daemon=True, name="blocksnoop-sampler"
+        )
         self._thread.start()
 
     def stop(self) -> None:

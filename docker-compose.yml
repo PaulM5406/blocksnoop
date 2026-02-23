@@ -1,5 +1,5 @@
 services:
-  loopspy:
+  blocksnoop:
     build: .
     privileged: true
     pid: host

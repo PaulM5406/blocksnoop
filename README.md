@@ -1,8 +1,8 @@
-# loopspy
+# blocksnoop
 
 Detect blocking calls in Python asyncio event loops using eBPF + py-spy.
 
-loopspy attaches to a running Python process (or launches one) and reports every time the event loop is blocked longer than a configurable threshold — with the Python stack trace that caused it.
+blocksnoop attaches to a running Python process (or launches one) and reports every time the event loop is blocked longer than a configurable threshold — with the Python stack trace that caused it.
 
 ## How it works
 
@@ -34,14 +34,14 @@ eBPF (kernel)          py-spy (userspace)
 ## Installation
 
 ```bash
-pip install loopspy
+pip install blocksnoop
 ```
 
 Or for development:
 
 ```bash
-git clone git@github.com:PaulM5406/loopspy.git
-cd loopspy
+git clone git@github.com:PaulM5406/blocksnoop.git
+cd blocksnoop
 uv sync --all-extras --dev
 ```
 
@@ -50,32 +50,32 @@ uv sync --all-extras --dev
 ### Attach to a running process
 
 ```bash
-sudo loopspy <PID>
-sudo loopspy -t 50 <PID>          # 50ms threshold (default: 100ms)
-sudo loopspy --tid 1234 <PID>     # monitor specific thread
+sudo blocksnoop <PID>
+sudo blocksnoop -t 50 <PID>          # 50ms threshold (default: 100ms)
+sudo blocksnoop --tid 1234 <PID>     # monitor specific thread
 ```
 
 ### Launch and monitor a process
 
 ```bash
-sudo loopspy -- python app.py
-sudo loopspy -t 50 -- python app.py
+sudo blocksnoop -- python app.py
+sudo blocksnoop -t 50 -- python app.py
 ```
 
 ### Output modes
 
 ```bash
 # Human-readable to stderr (default)
-sudo loopspy -- python app.py
+sudo blocksnoop -- python app.py
 
 # JSON lines to stdout (for piping to jq, etc.)
-sudo loopspy --json -- python app.py
+sudo blocksnoop --json -- python app.py
 
 # Structured JSON to file (for Datadog/Fluentd/CloudWatch)
-sudo loopspy --log-file /var/log/loopspy/events.json --service my-api --env production -- python app.py
+sudo blocksnoop --log-file /var/log/blocksnoop/events.json --service my-api --env production -- python app.py
 
 # Combine: console to terminal + JSON to file
-sudo loopspy --log-file /var/log/loopspy/events.json --service my-api -- python app.py
+sudo blocksnoop --log-file /var/log/blocksnoop/events.json --service my-api -- python app.py
 ```
 
 ### Example output
@@ -93,7 +93,7 @@ Human-readable:
     app.py:7 in blocking_io
     app.py:13 in main
 
---- loopspy session ---
+--- blocksnoop session ---
 Duration: 8.0s
 Blocking events detected: 2
 ```
@@ -107,38 +107,38 @@ JSON (`--json`):
 ### CLI reference
 
 ```
-loopspy [OPTIONS] [PID] [-- COMMAND ...]
+blocksnoop [OPTIONS] [PID] [-- COMMAND ...]
 
 Options:
   -t, --threshold FLOAT   Blocking threshold in ms (default: 100)
   --tid INT               Thread ID to monitor (default: main thread)
   --json                  JSON lines output to stdout
   --log-file PATH         Write structured JSON to file for log aggregators
-  --service NAME          Service name for structured logs (default: loopspy)
+  --service NAME          Service name for structured logs (default: blocksnoop)
   --env ENV               Environment tag for structured logs
   --no-color              Disable ANSI colors in terminal output
 ```
 
 ## Docker
 
-loopspy requires kernel access, so Docker containers need `--privileged` and `--pid=host`:
+blocksnoop requires kernel access, so Docker containers need `--privileged` and `--pid=host`:
 
 ```yaml
 # docker-compose.yml
 services:
-  loopspy:
+  blocksnoop:
     build: .
     privileged: true
     pid: host
 ```
 
 ```bash
-docker compose run --rm loopspy loopspy -t 100 -- python app.py
+docker compose run --rm blocksnoop blocksnoop -t 100 -- python app.py
 ```
 
 ## Kubernetes
 
-loopspy uses eBPF which operates at the kernel level, so you run it on the **node**, not inside the application container. The target process just needs to be visible from the host PID namespace.
+blocksnoop uses eBPF which operates at the kernel level, so you run it on the **node**, not inside the application container. The target process just needs to be visible from the host PID namespace.
 
 ### Ephemeral debug container (recommended)
 
@@ -150,7 +150,7 @@ kubectl get pods -l app=my-api
 
 # Attach an ephemeral debug container with the required privileges
 kubectl debug -it my-api-pod-7b8c9d \
-  --image=loopspy:latest \
+  --image=blocksnoop:latest \
   --target=my-api \
   -- sh
 ```
@@ -163,55 +163,55 @@ Inside the debug container, find the Python process and attach:
 # Find the Python PID
 ps aux | grep python
 
-# Attach loopspy
-loopspy -t 50 <PID>
+# Attach blocksnoop
+blocksnoop -t 50 <PID>
 
 # Or with structured logging
-loopspy --json -t 50 <PID>
+blocksnoop --json -t 50 <PID>
 ```
 
 This requires the ephemeral container to run as privileged. Your cluster must allow it (via PodSecurityPolicy, PodSecurityAdmission, or equivalent).
 
 ### DaemonSet sidecar
 
-For continuous monitoring, deploy loopspy as a DaemonSet that monitors processes on each node:
+For continuous monitoring, deploy blocksnoop as a DaemonSet that monitors processes on each node:
 
 ```yaml
 apiVersion: apps/v1
 kind: DaemonSet
 metadata:
-  name: loopspy
+  name: blocksnoop
 spec:
   selector:
     matchLabels:
-      app: loopspy
+      app: blocksnoop
   template:
     metadata:
       labels:
-        app: loopspy
+        app: blocksnoop
     spec:
       hostPID: true
       containers:
-        - name: loopspy
-          image: loopspy:latest
-          command: ["loopspy", "--json", "--log-file", "/var/log/loopspy/events.json", "--service", "my-api", "--env", "production", "-t", "100"]
+        - name: blocksnoop
+          image: blocksnoop:latest
+          command: ["blocksnoop", "--json", "--log-file", "/var/log/blocksnoop/events.json", "--service", "my-api", "--env", "production", "-t", "100"]
           securityContext:
             privileged: true
           volumeMounts:
             - name: logs
-              mountPath: /var/log/loopspy
+              mountPath: /var/log/blocksnoop
             - name: debugfs
               mountPath: /sys/kernel/debug
       volumes:
         - name: logs
           hostPath:
-            path: /var/log/loopspy
+            path: /var/log/blocksnoop
         - name: debugfs
           hostPath:
             path: /sys/kernel/debug
 ```
 
-The log file at `/var/log/loopspy/events.json` can be tailed by Datadog Agent, Fluentd, or any log collector running on the node.
+The log file at `/var/log/blocksnoop/events.json` can be tailed by Datadog Agent, Fluentd, or any log collector running on the node.
 
 ### Node shell (quick one-off)
 
@@ -221,14 +221,14 @@ For a quick check without building images:
 # SSH into the node (or use a node shell tool)
 kubectl node-shell <node-name>
 
-# Install loopspy
-pip install loopspy
+# Install blocksnoop
+pip install blocksnoop
 
 # Find the Python process (hostPID shows all processes)
 ps aux | grep python
 
 # Attach
-loopspy -t 50 <PID>
+blocksnoop -t 50 <PID>
 ```
 
 ## Development
@@ -244,11 +244,11 @@ uv run --extra dev pytest tests/ -v --ignore=tests/integration
 uv run --extra dev pytest -m docker tests/integration/ -v
 
 # Lint and format
-ruff check loopspy/ tests/
-ruff format loopspy/ tests/
+ruff check blocksnoop/ tests/
+ruff format blocksnoop/ tests/
 
 # Type check
-ty check loopspy/
+ty check blocksnoop/
 ```
 
 ## License

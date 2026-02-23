@@ -11,7 +11,7 @@ import pytest
 
 
 @dataclass
-class LoopspyResult:
+class BlocksnoopResult:
     exit_code: int
     stdout: str
     stderr: str
@@ -19,17 +19,26 @@ class LoopspyResult:
     raw_lines: list[str] = field(default_factory=list)
 
 
-def run_loopspy_docker(
+def run_blocksnoop_docker(
     fixture: str,
     timeout_s: int = 8,
     threshold_ms: int = 100,
     extra_args: list[str] | None = None,
-) -> LoopspyResult:
-    """Run loopspy in Docker against a test fixture, return parsed result."""
+) -> BlocksnoopResult:
+    """Run blocksnoop in Docker against a test fixture, return parsed result."""
     cmd = [
-        "docker", "compose", "run", "--rm", "loopspy",
-        "timeout", "--signal=TERM", str(timeout_s),
-        "loopspy", "--json", "-t", str(threshold_ms),
+        "docker",
+        "compose",
+        "run",
+        "--rm",
+        "blocksnoop",
+        "timeout",
+        "--signal=TERM",
+        str(timeout_s),
+        "blocksnoop",
+        "--json",
+        "-t",
+        str(threshold_ms),
     ]
     if extra_args:
         cmd.extend(extra_args)
@@ -45,7 +54,7 @@ def run_loopspy_docker(
         except (json.JSONDecodeError, ValueError):
             continue  # skip summary lines or partial output on SIGTERM
 
-    return LoopspyResult(
+    return BlocksnoopResult(
         exit_code=proc.returncode,
         stdout=proc.stdout,
         stderr=proc.stderr,
@@ -62,7 +71,9 @@ def docker_image():
 
     # Check Docker daemon is running
     check = subprocess.run(
-        ["docker", "info"], capture_output=True, timeout=10,
+        ["docker", "info"],
+        capture_output=True,
+        timeout=10,
     )
     if check.returncode != 0:
         pytest.skip("Docker daemon not running")
@@ -70,7 +81,9 @@ def docker_image():
     # Build the image
     result = subprocess.run(
         ["docker", "compose", "build"],
-        capture_output=True, text=True, timeout=300,
+        capture_output=True,
+        text=True,
+        timeout=300,
     )
     if result.returncode != 0:
         pytest.skip(f"Docker build failed: {result.stderr[:500]}")

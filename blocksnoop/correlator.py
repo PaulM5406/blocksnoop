@@ -1,16 +1,20 @@
-"""Correlator module for loopspy — enriches blocking events with Python stacks."""
+"""Correlator module for blocksnoop — enriches blocking events with Python stacks."""
 
 from __future__ import annotations
 
 from collections.abc import Callable
 from dataclasses import replace
 
-from loopspy.core import BlockingEvent
-from loopspy.profiler import StackRingBuffer
+from blocksnoop.core import BlockingEvent
+from blocksnoop.profiler import StackRingBuffer
 
 
 class Correlator:
-    def __init__(self, ring_buffer: StackRingBuffer, reporter_callback: Callable[[BlockingEvent], None]) -> None:
+    def __init__(
+        self,
+        ring_buffer: StackRingBuffer,
+        reporter_callback: Callable[[BlockingEvent], None],
+    ) -> None:
         self._ring_buffer = ring_buffer
         self._callback = reporter_callback
 

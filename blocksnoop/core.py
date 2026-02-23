@@ -1,4 +1,4 @@
-"""Core data structures for loopspy."""
+"""Core data structures for blocksnoop."""
 
 from __future__ import annotations
 

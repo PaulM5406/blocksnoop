@@ -1,4 +1,4 @@
-"""CLI entry point for loopspy."""
+"""CLI entry point for blocksnoop."""
 
 from __future__ import annotations
 
@@ -9,12 +9,12 @@ import subprocess
 import sys
 import time
 
-from loopspy.core import DetectorConfig
-from loopspy.correlator import Correlator
-from loopspy.detector import EbpfDetector
-from loopspy.profiler import StackSampler, check_pyspy_available
-from loopspy.reporter import Reporter
-from loopspy.sinks import ConsoleSink, JsonFileSink, JsonStreamSink, Sink
+from blocksnoop.core import DetectorConfig
+from blocksnoop.correlator import Correlator
+from blocksnoop.detector import EbpfDetector
+from blocksnoop.profiler import StackSampler, check_pyspy_available
+from blocksnoop.reporter import Reporter
+from blocksnoop.sinks import ConsoleSink, JsonFileSink, JsonStreamSink, Sink
 
 
 def main() -> None:
@@ -51,8 +51,8 @@ def main() -> None:
     )
     parser.add_argument(
         "--service",
-        default="loopspy",
-        help="Service name for structured logs (default: loopspy)",
+        default="blocksnoop",
+        help="Service name for structured logs (default: blocksnoop)",
     )
     parser.add_argument(
         "--env",
@@ -65,13 +65,13 @@ def main() -> None:
 
     args = parser.parse_args()
 
-    # Strip leading "--" from command list (used as separator: loopspy -- python app.py)
+    # Strip leading "--" from command list (used as separator: blocksnoop -- python app.py)
     command: list[str] = list(args.command)
     if command and command[0] == "--":
         command = command[1:]
 
     # Resolve target: if it's not a valid PID, treat it as part of the command
-    # (handles: loopspy -- python app.py, where argparse assigns "python" to target)
+    # (handles: blocksnoop -- python app.py, where argparse assigns "python" to target)
     target_pid: int | None = None
     if args.target is not None:
         try:
@@ -81,7 +81,7 @@ def main() -> None:
 
     # Validation: must be root
     if os.geteuid() != 0:
-        print("error: loopspy must be run as root (sudo)", file=sys.stderr)
+        print("error: blocksnoop must be run as root (sudo)", file=sys.stderr)
         sys.exit(1)
 
     # Validation: py-spy must be available

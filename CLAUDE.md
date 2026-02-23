@@ -9,8 +9,8 @@
 ## Toolchain
 
 - **uv** is the Python package manager. Use `uv sync --all-extras --dev` to install dependencies.
-- **ruff** is the Python linter and formatter (`ruff check loopspy/`, `ruff format loopspy/`).
-- **ty** is the Python type checker (`ty check loopspy/`).
+- **ruff** is the Python linter and formatter (`ruff check blocksnoop/`, `ruff format blocksnoop/`).
+- **ty** is the Python type checker (`ty check blocksnoop/`).
 - **pytest** runs tests. Unit tests need no special setup; integration tests require Docker and are marked with `@pytest.mark.docker`.
 
 ## Verification
@@ -25,9 +25,9 @@ Always:
 uv run --extra dev pytest tests/ -v --ignore=tests/integration
 
 # Python lint + format + type check
-ruff check loopspy/ tests/
-ruff format --check loopspy/ tests/
-ty check loopspy/
+ruff check blocksnoop/ tests/
+ruff format --check blocksnoop/ tests/
+ty check blocksnoop/
 ```
 
 Integration tests (require Docker):

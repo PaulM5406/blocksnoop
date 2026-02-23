@@ -1,4 +1,4 @@
-"""eBPF-based blocking event detector for loopspy."""
+"""eBPF-based blocking event detector for blocksnoop."""
 
 from __future__ import annotations
 
@@ -7,7 +7,7 @@ import os
 import threading
 from typing import Callable
 
-from loopspy.core import BlockingEvent, DetectorConfig
+from blocksnoop.core import BlockingEvent, DetectorConfig
 
 
 # Preferred order: epoll_wait is simplest (no sigset_t), then epoll_pwait, then epoll_pwait2.
@@ -46,7 +46,9 @@ class EbpfDetector:
         self._stop_event = threading.Event()
         self._thread: threading.Thread | None = None
 
-        bpf_source_path = os.path.join(os.path.dirname(__file__), "bpf", "blockdetect.c")
+        bpf_source_path = os.path.join(
+            os.path.dirname(__file__), "bpf", "blockdetect.c"
+        )
         with open(bpf_source_path, "r") as f:
             source = f.read()
 

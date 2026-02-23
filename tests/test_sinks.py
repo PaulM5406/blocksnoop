@@ -1,10 +1,15 @@
-"""Unit tests for loopspy.sinks."""
+"""Unit tests for blocksnoop.sinks."""
 
 import json
 import tempfile
 from io import StringIO
 
-from loopspy.sinks import ConsoleSink, JsonFileSink, JsonStreamSink, _level_for_duration
+from blocksnoop.sinks import (
+    ConsoleSink,
+    JsonFileSink,
+    JsonStreamSink,
+    _level_for_duration,
+)
 
 
 def _make_record(
@@ -80,7 +85,7 @@ def test_console_summary():
     sink = ConsoleSink(stream=buf, color=False)
     sink.emit_summary(_make_summary())
     output = buf.getvalue()
-    assert "loopspy session" in output
+    assert "blocksnoop session" in output
     assert "45.2s" in output
     assert "3" in output
 
@@ -228,7 +233,7 @@ def test_json_file_datadog_fields():
     with open(path) as f:
         record = json.loads(f.readline().strip())
     assert record["service"] == "my-api"
-    assert record["source"] == "loopspy"
+    assert record["source"] == "blocksnoop"
     assert record["dd"] == {"service": "my-api", "env": "staging"}
     assert "T" in record["timestamp"]  # ISO format
     assert record["level"] == "warning"

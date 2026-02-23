@@ -1,8 +1,8 @@
-"""Unit tests for loopspy.core data structures."""
+"""Unit tests for blocksnoop.core data structures."""
 
 import pytest
 
-from loopspy.core import BlockingEvent, DetectorConfig, PythonStackTrace, StackFrame
+from blocksnoop.core import BlockingEvent, DetectorConfig, PythonStackTrace, StackFrame
 
 
 def test_stack_frame_frozen():

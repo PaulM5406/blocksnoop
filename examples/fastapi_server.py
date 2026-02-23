@@ -7,10 +7,10 @@ synchronous operations inside async handlers, blocking the event loop.
 Each handler has three categories of code:
   - FAST SYNC: quick in-memory ops (SQLite, JSON, regex) — not flagged
   - ASYNC: properly non-blocking (to_thread, async sleep) — not flagged
-  - SLOW SYNC (BUG): blocking calls on the event loop — FLAGGED by loopspy
+  - SLOW SYNC (BUG): blocking calls on the event loop — FLAGGED by blocksnoop
 
 Run with:
-    docker compose run --rm loopspy loopspy -t 50 -- python examples/fastapi_server.py
+    docker compose run --rm blocksnoop blocksnoop -t 50 -- python examples/fastapi_server.py
 """
 
 import asyncio
@@ -24,7 +24,7 @@ import time
 
 
 # ---------------------------------------------------------------------------
-# In-memory SQLite — real sync I/O that loopspy should NOT flag (fast enough)
+# In-memory SQLite — real sync I/O that blocksnoop should NOT flag (fast enough)
 # ---------------------------------------------------------------------------
 
 _db = sqlite3.connect(":memory:")
