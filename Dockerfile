@@ -24,6 +24,3 @@ WORKDIR /app
 COPY . .
 RUN UV_PROJECT_ENVIRONMENT=/opt/venv uv sync --no-dev
 ENV PATH="/opt/venv/bin:$PATH"
-
-COPY docker-entrypoint.sh /usr/local/bin/
-ENTRYPOINT ["docker-entrypoint.sh"]

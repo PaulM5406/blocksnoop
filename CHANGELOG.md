@@ -1,5 +1,19 @@
 # Changelog
 
+## [v0.2.0] - 2026-02-26
+
+### Added
+
+- Auto-detect and symlink kernel headers in Python, fixing `kubectl debug` usage where `docker-entrypoint.sh` was bypassed
+
+### Changed
+
+- README Kubernetes ephemeral container example now uses `--profile=sysadmin` for eBPF access
+
+### Removed
+
+- `docker-entrypoint.sh` — kernel header logic moved into `detector.py`
+
 ## [v0.1.1] - 2026-02-23
 
 ### Added

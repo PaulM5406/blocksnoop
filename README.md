@@ -160,20 +160,21 @@ blocksnoop uses eBPF which operates at the kernel level, so you run it on the **
 
 ### Ephemeral debug container (recommended)
 
-Attach directly to a running pod with an ephemeral container:
+Attach directly to a running pod with an ephemeral container. `--profile=sysadmin` (K8s 1.28+) grants the privileged access required for eBPF:
 
 ```bash
 # Find the pod
 kubectl get pods -l app=my-api
 
-# Attach an ephemeral debug container with the required privileges
+# Attach an ephemeral debug container with eBPF privileges
 kubectl debug -it my-api-pod-7b8c9d \
   --image=oloapm/blocksnoop:latest \
   --target=my-api \
-  -- sh
+  --profile=sysadmin \
+  -- sh -c "mount -t debugfs debugfs /sys/kernel/debug 2>/dev/null; exec sh"
 ```
 
-> The `--target` flag shares the process namespace with the app container, so you can see its PIDs.
+> `--target` shares the process namespace with the app container, so you can see its PIDs. `--profile=sysadmin` enables privileged mode for eBPF and debugfs access.
 
 Inside the debug container, find the Python process and attach:
 
@@ -188,7 +189,7 @@ blocksnoop -t 50 <PID>
 blocksnoop --json -t 50 <PID>
 ```
 
-This requires the ephemeral container to run as privileged. Your cluster must allow it (via PodSecurityPolicy, PodSecurityAdmission, or equivalent).
+blocksnoop automatically detects and symlinks available kernel headers when the running kernel differs from the installed headers package (common in containers).
 
 ### DaemonSet sidecar
 

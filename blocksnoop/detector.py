@@ -3,9 +3,13 @@
 from __future__ import annotations
 
 import ctypes
+import glob
 import logging
 import os
+import platform
 import threading
+from pathlib import Path
+
 from collections.abc import Callable
 
 from blocksnoop.core import BlockingEvent, DetectorConfig
@@ -16,6 +20,77 @@ _logger = logging.getLogger("blocksnoop.detector")
 # Preferred order: epoll_wait is simplest (no sigset_t), then epoll_pwait, then epoll_pwait2.
 _EPOLL_CANDIDATES = ("epoll_wait", "epoll_pwait", "epoll_pwait2")
 _TRACEFS_EVENTS = "/sys/kernel/debug/tracing/events/syscalls"
+
+_ARCH_SUFFIXES = ("arm64", "amd64", "cloud-amd64")
+_MACHINE_TO_KARCH = {"aarch64": "arm64", "x86_64": "x86"}
+
+
+def _ensure_kernel_headers() -> None:
+    """Symlink installed kernel headers so BCC finds them for the running kernel.
+
+    In containers the installed headers package often differs from the host
+    kernel.  BCC only needs stable UAPI headers for blocksnoop's tracepoint
+    program, so mismatched versions work fine.
+    """
+    kernel = os.uname().release
+    build_dir = Path(f"/lib/modules/{kernel}/build")
+
+    if build_dir.is_dir():
+        return
+
+    # Find arch-specific headers
+    arch_headers: Path | None = None
+    for suffix in _ARCH_SUFFIXES:
+        matches = sorted(glob.glob(f"/usr/src/linux-headers-*-{suffix}"))
+        if matches:
+            arch_headers = Path(matches[0])
+            break
+
+    # Find common headers
+    common_matches = sorted(glob.glob("/usr/src/linux-headers-*-common"))
+    common_headers = Path(common_matches[0]) if common_matches else None
+
+    if not arch_headers and not common_headers:
+        _logger.warning(
+            "No kernel headers found in /usr/src — BCC compilation will likely fail"
+        )
+        return
+
+    headers = arch_headers or common_headers
+    assert headers is not None
+
+    build_dir.parent.mkdir(parents=True, exist_ok=True)
+    build_dir.symlink_to(headers)
+    _logger.debug("Symlinked %s → %s", build_dir, headers)
+
+    # Merge common includes into arch-specific tree
+    if common_headers and arch_headers:
+        _merge_common_headers(arch_headers, common_headers)
+
+
+def _merge_common_headers(arch_headers: Path, common_headers: Path) -> None:
+    """Symlink common header dirs and arch-specific asm into the arch tree."""
+    include = common_headers / "include"
+    if include.is_dir():
+        for sub in include.iterdir():
+            target = arch_headers / "include" / sub.name
+            if not target.exists():
+                target.symlink_to(sub)
+                _logger.debug("Symlinked common include %s", sub.name)
+
+    machine = platform.machine()
+    karch = _MACHINE_TO_KARCH.get(machine, machine)
+
+    asm_src = common_headers / "arch" / karch / "include" / "asm"
+    asm_dst = arch_headers / "include" / "asm"
+    if asm_src.is_dir() and not asm_dst.exists():
+        asm_dst.symlink_to(asm_src)
+
+    uapi_asm_src = common_headers / "arch" / karch / "include" / "uapi" / "asm"
+    uapi_asm_dst = arch_headers / "include" / "uapi" / "asm"
+    if uapi_asm_src.is_dir() and not uapi_asm_dst.exists():
+        uapi_asm_dst.parent.mkdir(parents=True, exist_ok=True)
+        uapi_asm_dst.symlink_to(uapi_asm_src)
 
 
 def _detect_epoll_syscall() -> str:
@@ -63,6 +138,8 @@ class EbpfDetector:
         source = source.replace("__EPOLL_SYSCALL__", epoll_syscall)
         if epoll_syscall != "epoll_wait":
             source = source.replace("#ifdef __NEEDS_SIGSET_T__", "#if 1")
+
+        _ensure_kernel_headers()
 
         from bcc import BPF  # type: ignore[import]
 
