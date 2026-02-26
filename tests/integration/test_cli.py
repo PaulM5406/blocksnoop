@@ -44,9 +44,9 @@ def test_human_readable_output(docker_image):
         text=True,
         timeout=40,
     )
-    assert (
-        "BLOCKED" in proc.stderr
-    ), f"Expected 'BLOCKED' in stderr output, got:\nstderr={proc.stderr[:500]}\nstdout={proc.stdout[:500]}"
+    assert "BLOCKED" in proc.stderr, (
+        f"Expected 'BLOCKED' in stderr output, got:\nstderr={proc.stderr[:500]}\nstdout={proc.stdout[:500]}"
+    )
 
 
 def test_log_file_output(docker_image):
@@ -71,9 +71,9 @@ def test_log_file_output(docker_image):
     )
     # The cat output appears on stdout
     lines = [line for line in proc.stdout.strip().splitlines() if line.strip()]
-    assert (
-        len(lines) >= 1
-    ), f"Expected JSON lines in log file, got:\n{proc.stdout[:500]}"
+    assert len(lines) >= 1, (
+        f"Expected JSON lines in log file, got:\n{proc.stdout[:500]}"
+    )
 
     for line in lines:
         record = json.loads(line)
