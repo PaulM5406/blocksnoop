@@ -90,6 +90,12 @@ class ConsoleSink:
                     if self._color:
                         line = f"{_DIM}{line}{_RESET}"
                     self._stream.write(line + "\n")
+                    source = frame.get("source")
+                    if source:
+                        src_line = f"      {source}"
+                        if self._color:
+                            src_line = f"{_DIM}{src_line}{_RESET}"
+                        self._stream.write(src_line + "\n")
                 if len(frames_to_show) < len(stack):
                     hidden = len(stack) - len(frames_to_show)
                     note = f"    ... {hidden} asyncio/stdlib frames hidden"

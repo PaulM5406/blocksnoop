@@ -1,5 +1,11 @@
 # Changelog
 
+## [v0.4.0] - 2026-02-27
+
+### Added
+
+- Source code lines displayed inline in stack traces (console and JSON output)
+
 ## [v0.3.0] - 2026-02-27
 
 ### Added

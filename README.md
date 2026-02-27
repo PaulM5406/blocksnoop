@@ -88,12 +88,16 @@ Human-readable:
 [   1.23s] #1   BLOCKED     302.1ms  tid=1234
   Python stack (most recent call last):
     app.py:7 in blocking_io
+      time.sleep(0.5)
     app.py:13 in main
+      blocking_io()
 
 [   2.05s] #2   BLOCKED     298.5ms  tid=1234
   Python stack (most recent call last):
     app.py:7 in blocking_io
+      time.sleep(0.5)
     app.py:13 in main
+      blocking_io()
 
 --- blocksnoop session ---
 Duration: 8.0s
@@ -103,7 +107,7 @@ Blocking events detected: 2
 JSON (`--json`):
 
 ```json
-{"event_number": 1, "timestamp_s": 1.23, "duration_ms": 302.1, "pid": 5678, "tid": 1234, "python_stacks": [[{"function": "blocking_io", "file": "app.py", "line": 7}, {"function": "main", "file": "app.py", "line": 13}]], "level": "warning"}
+{"event_number": 1, "timestamp_s": 1.23, "duration_ms": 302.1, "pid": 5678, "tid": 1234, "python_stacks": [[{"function": "blocking_io", "file": "app.py", "line": 7, "source": "time.sleep(0.5)"}, {"function": "main", "file": "app.py", "line": 13, "source": "blocking_io()"}]], "level": "warning"}
 ```
 
 ### CLI reference

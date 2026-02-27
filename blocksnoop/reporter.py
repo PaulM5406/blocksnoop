@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import linecache
 import logging
 import time
 from collections.abc import Sequence
@@ -10,6 +11,12 @@ from blocksnoop.core import BlockingEvent
 from blocksnoop.sinks import ConsoleSink, Sink
 
 _logger = logging.getLogger("blocksnoop.reporter")
+
+
+def _get_source_line(file: str, line: int) -> str | None:
+    """Return the stripped source code at *file*:*line*, or None."""
+    text = linecache.getline(file, line).strip()
+    return text if text else None
 
 
 class Reporter:
@@ -31,7 +38,12 @@ class Reporter:
         if event.python_stacks:
             python_stacks = [
                 [
-                    {"function": f.function, "file": f.file, "line": f.line}
+                    {
+                        "function": f.function,
+                        "file": f.file,
+                        "line": f.line,
+                        "source": _get_source_line(f.file, f.line),
+                    }
                     for f in stack.frames
                 ]
                 for stack in event.python_stacks

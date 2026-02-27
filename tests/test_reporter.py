@@ -4,7 +4,7 @@ import json
 from io import StringIO
 
 from blocksnoop.core import BlockingEvent, PythonStackTrace, StackFrame
-from blocksnoop.reporter import Reporter
+from blocksnoop.reporter import Reporter, _get_source_line
 from blocksnoop.sinks import ConsoleSink, JsonStreamSink
 
 
@@ -122,3 +122,35 @@ def test_close():
     buf = StringIO()
     reporter = Reporter(sinks=[ConsoleSink(stream=buf, color=False)])
     reporter.close()  # should not raise
+
+
+# --- _get_source_line ---
+
+
+def test_get_source_line_real_file():
+    """Reading a line from a real file returns stripped source."""
+    # __file__ is this test file; line 1 is the module docstring.
+    result = _get_source_line(__file__, 1)
+    assert result is not None
+    assert "Unit tests" in result
+
+
+def test_get_source_line_nonexistent_file():
+    assert _get_source_line("/no/such/file.py", 1) is None
+
+
+def test_get_source_line_out_of_range():
+    assert _get_source_line(__file__, 999_999) is None
+
+
+# --- source field in report() ---
+
+
+def test_report_includes_source_field():
+    """report() adds a 'source' key to each frame dict."""
+    buf = StringIO()
+    reporter = Reporter(sinks=[JsonStreamSink(stream=buf)])
+    reporter.report(_make_event())
+    record = json.loads(buf.getvalue().strip())
+    for frame in record["python_stacks"][0]:
+        assert "source" in frame

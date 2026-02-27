@@ -19,8 +19,18 @@ def _make_record(
     if with_stack:
         stacks = [
             [
-                {"function": "cpu_heavy", "file": "app.py", "line": 42},
-                {"function": "main", "file": "app.py", "line": 30},
+                {
+                    "function": "cpu_heavy",
+                    "file": "app.py",
+                    "line": 42,
+                    "source": "do_work()",
+                },
+                {
+                    "function": "main",
+                    "file": "app.py",
+                    "line": 30,
+                    "source": "cpu_heavy()",
+                },
             ]
         ]
     return {
@@ -144,6 +154,55 @@ def test_console_color_dim_stack():
     sink.emit(_make_record(with_stack=True))
     output = buf.getvalue()
     assert "\033[2m" in output  # dim for stack frames
+
+
+def test_console_emit_source_lines():
+    """Source code lines are displayed indented below frame references."""
+    buf = StringIO()
+    sink = ConsoleSink(stream=buf, color=False)
+    sink.emit(_make_record())
+    output = buf.getvalue()
+    assert "      do_work()" in output
+    assert "      cpu_heavy()" in output
+
+
+def test_console_emit_source_none_skipped():
+    """Frames with source=None don't produce an extra line."""
+    record = _make_record()
+    record["python_stacks"] = [
+        [
+            {"function": "foo", "file": "app.py", "line": 1, "source": None},
+            {"function": "bar", "file": "app.py", "line": 2, "source": "bar()"},
+        ]
+    ]
+    buf = StringIO()
+    sink = ConsoleSink(stream=buf, color=False)
+    sink.emit(record)
+    lines = buf.getvalue().splitlines()
+    # After the "foo" frame line there should NOT be a source line
+    foo_idx = next(i for i, text in enumerate(lines) if "foo" in text)
+    assert (
+        "bar" in lines[foo_idx + 1]
+    )  # next line is the "bar" frame, not a source line
+
+
+def test_console_emit_source_dim_color():
+    """Source lines use DIM styling when color is enabled."""
+    buf = StringIO()
+    sink = ConsoleSink(stream=buf, color=True)
+    sink.emit(_make_record())
+    output = buf.getvalue()
+    assert "\033[2m      do_work()\033[0m" in output
+
+
+def test_json_stream_passthrough_source():
+    """JSON sinks pass through the source field as-is."""
+    buf = StringIO()
+    sink = JsonStreamSink(stream=buf)
+    sink.emit(_make_record())
+    record = json.loads(buf.getvalue().strip())
+    frame = record["python_stacks"][0][0]
+    assert frame["source"] == "do_work()"
 
 
 def test_console_hides_asyncio_frames():
