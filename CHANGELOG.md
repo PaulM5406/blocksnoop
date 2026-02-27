@@ -1,5 +1,17 @@
 # Changelog
 
+## [v0.5.0] - 2026-02-27
+
+### Added
+
+- `--stats` mode: run only the eBPF detector to capture all epoll gaps and display live distribution statistics (count, min, avg, p50, p90, p95, p99, max, events/s)
+- Stats mode supports `--json` for machine-readable output (one JSON line per second)
+- Stats mode skips Austin profiler requirement, making it easier to get started
+
+### Changed
+
+- `--threshold` default is now `0` in stats mode (capture all gaps) and `100` in normal mode
+
 ## [v0.4.0] - 2026-02-27
 
 ### Added

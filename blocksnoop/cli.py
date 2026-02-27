@@ -9,6 +9,7 @@ import signal
 import subprocess
 import sys
 import time
+import typing
 
 from blocksnoop.core import DetectorConfig
 from blocksnoop.correlator import Correlator
@@ -19,6 +20,7 @@ from blocksnoop.profiler import (
 )
 from blocksnoop.reporter import Reporter
 from blocksnoop.sinks import ConsoleSink, JsonFileSink, JsonStreamSink, Sink
+from blocksnoop.stats import StatsCollector
 
 _logger = logging.getLogger("blocksnoop.cli")
 
@@ -40,8 +42,13 @@ def _parse_args(
         "-t",
         "--threshold",
         type=float,
-        default=100,
-        help="Blocking threshold in ms (default: 100)",
+        default=None,
+        help="Blocking threshold in ms (default: 100, or 0 with --stats)",
+    )
+    parser.add_argument(
+        "--stats",
+        action="store_true",
+        help="eBPF-only mode: capture all epoll gaps and show distribution statistics",
     )
     parser.add_argument(
         "--tid",
@@ -111,13 +118,13 @@ def _resolve_target(args: argparse.Namespace) -> tuple[int | None, list[str]]:
     return target_pid, command
 
 
-def _validate_environment() -> None:
+def _validate_environment(*, stats_mode: bool = False) -> None:
     """Check runtime prerequisites; exits on failure."""
     if os.geteuid() != 0:
         print("error: blocksnoop must be run as root (sudo)", file=sys.stderr)
         sys.exit(1)
 
-    if not check_austin_available():
+    if not stats_mode and not check_austin_available():
         print(
             "error: austin not found in PATH.\n"
             "  Install: https://github.com/P403n1x87/austin",
@@ -163,6 +170,38 @@ def _build_sinks(args: argparse.Namespace) -> list[Sink]:
     return sinks
 
 
+def _run_loop(
+    start: typing.Callable[[], None],
+    stop: typing.Callable[[], None],
+    on_exit: typing.Callable[[], None],
+    child_process: subprocess.Popen | None,
+) -> None:
+    """Signal/wait loop shared by normal and stats paths."""
+    start()
+
+    def _shutdown(signum: int, frame: object) -> None:
+        stop()
+        on_exit()
+        if child_process is not None:
+            child_process.terminate()
+        sys.exit(0)
+
+    signal.signal(signal.SIGINT, _shutdown)
+    signal.signal(signal.SIGTERM, _shutdown)
+
+    if child_process is not None:
+        try:
+            child_process.wait()
+        except KeyboardInterrupt:
+            pass
+        stop()
+        on_exit()
+        child_process.terminate()
+    else:
+        while True:
+            time.sleep(1)
+
+
 def main() -> None:
     args, parser = _parse_args()
 
@@ -172,9 +211,13 @@ def main() -> None:
         format="%(name)s %(levelname)s: %(message)s",
     )
 
+    # Resolve threshold default: 0 for --stats, 100 otherwise
+    if args.threshold is None:
+        args.threshold = 0.0 if args.stats else 100.0
+
     target_pid, command = _resolve_target(args)
 
-    _validate_environment()
+    _validate_environment(stats_mode=args.stats)
 
     # Validation: must have either a PID or a command
     if target_pid is None and not command:
@@ -184,8 +227,6 @@ def main() -> None:
             file=sys.stderr,
         )
         sys.exit(1)
-
-    sinks = _build_sinks(args)
 
     child_process: subprocess.Popen | None = None
 
@@ -198,7 +239,51 @@ def main() -> None:
         assert target_pid is not None  # guaranteed by validation above
         pid = target_pid
 
-    # Wire the pipeline
+    if args.stats:
+        _run_stats(args, pid, child_process)
+    else:
+        _run_normal(args, pid, child_process)
+
+
+def _run_stats(
+    args: argparse.Namespace,
+    pid: int,
+    child_process: subprocess.Popen | None,
+) -> None:
+    """Stats-only path: eBPF detector + StatsCollector, no Austin."""
+    config = DetectorConfig(
+        pid=pid,
+        threshold_ms=args.threshold,
+        tid=args.tid,
+    )
+    collector = StatsCollector(pid=pid, json_mode=args.json_mode)
+    detector = EbpfDetector(config=config, callback=collector.on_event)
+
+    _logger.debug(
+        "Stats mode: pid=%d, tid=%d, threshold=%.0fms",
+        config.pid,
+        config.tid,
+        config.threshold_ms,
+    )
+
+    def _start() -> None:
+        collector.start()
+        detector.start()
+
+    def _stop() -> None:
+        detector.stop()
+        collector.stop()
+
+    _run_loop(_start, _stop, on_exit=lambda: None, child_process=child_process)
+
+
+def _run_normal(
+    args: argparse.Namespace,
+    pid: int,
+    child_process: subprocess.Popen | None,
+) -> None:
+    """Normal path: eBPF + Austin + correlator + reporter."""
+    sinks = _build_sinks(args)
     config = DetectorConfig(
         pid=pid,
         threshold_ms=args.threshold,
@@ -227,36 +312,20 @@ def main() -> None:
     )
 
     start_time = time.monotonic()
-    sampler.start()
-    detector.start()
 
-    def _shutdown(signum: int, frame: object) -> None:
+    def _start() -> None:
+        sampler.start()
+        detector.start()
+
+    def _stop() -> None:
         detector.stop()
         sampler.stop()
+
+    def _on_exit() -> None:
         reporter.summary(time.monotonic() - start_time)
         reporter.close()
-        if child_process is not None:
-            child_process.terminate()
-        sys.exit(0)
 
-    signal.signal(signal.SIGINT, _shutdown)
-    signal.signal(signal.SIGTERM, _shutdown)
-
-    # In launch mode, also forward signals to the child and wait for it
-    if child_process is not None:
-        try:
-            child_process.wait()
-        except KeyboardInterrupt:
-            pass
-        detector.stop()
-        sampler.stop()
-        reporter.summary(time.monotonic() - start_time)
-        reporter.close()
-        child_process.terminate()
-    else:
-        # Attach mode: sleep until interrupted
-        while True:
-            time.sleep(1)
+    _run_loop(_start, _stop, _on_exit, child_process)
 
 
 if __name__ == "__main__":

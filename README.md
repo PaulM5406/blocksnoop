@@ -80,6 +80,35 @@ sudo blocksnoop --log-file /var/log/blocksnoop/events.json --service my-api --en
 sudo blocksnoop --log-file /var/log/blocksnoop/events.json --service my-api -- python app.py
 ```
 
+### Stats mode
+
+Use `--stats` to run **only the eBPF detector** (no Austin profiler, no stack traces) and see the distribution of all epoll gaps. This helps you pick the right `--threshold` before running a full profiling session.
+
+```bash
+# Capture all epoll gaps and display live statistics
+sudo blocksnoop --stats <PID>
+
+# JSON lines output (one record per second)
+sudo blocksnoop --stats --json <PID>
+
+# Only gaps above 10ms
+sudo blocksnoop --stats -t 10 <PID>
+```
+
+Sample output (redrawn in place every second):
+
+```
+blocksnoop stats — PID 1234 — 12.3s — 4821 events (391/s)
+
+  min          0.0ms
+  avg          2.1ms
+  p50          0.8ms
+  p90          4.2ms
+  p95          8.7ms
+  p99         45.3ms
+  max        302.1ms
+```
+
 ### Example output
 
 Human-readable:
@@ -116,7 +145,8 @@ JSON (`--json`):
 blocksnoop [OPTIONS] [PID] [-- COMMAND ...]
 
 Options:
-  -t, --threshold FLOAT        Blocking threshold in ms (default: 100)
+  -t, --threshold FLOAT        Blocking threshold in ms (default: 100, or 0 with --stats)
+  --stats                      eBPF-only mode: show epoll gap distribution (no Austin/stacks)
   --tid INT                    Thread ID to monitor (default: main thread)
   --json                       JSON lines output to stdout
   --log-file PATH              Write structured JSON to file for log aggregators

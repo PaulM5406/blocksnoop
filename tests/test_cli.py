@@ -35,7 +35,8 @@ def _fake_root():
 def test_parse_args_defaults():
     args, _ = _parse_args(["1234"])
     assert args.target == "1234"
-    assert args.threshold == 100
+    assert args.threshold is None
+    assert args.stats is False
     assert args.tid is None
     assert args.json_mode is False
     assert args.log_file is None
@@ -81,6 +82,12 @@ def test_parse_args_all_flags():
     assert args.error_threshold == 300.0
     assert args.correlation_padding == 150.0
     assert args.target == "5678"
+
+
+def test_parse_args_stats_flag():
+    args, _ = _parse_args(["--stats", "1234"])
+    assert args.stats is True
+    assert args.threshold is None  # resolved later in main()
 
 
 def test_parse_args_threshold_and_padding_parsing():
@@ -137,6 +144,19 @@ def test_validate_missing_austin_error(capsys):
     ):
         _validate_environment()
     assert "austin not found" in capsys.readouterr().err
+
+
+def test_validate_stats_mode_skips_austin():
+    """In stats mode, missing Austin should not cause an error."""
+    import types
+
+    fake_bcc = types.ModuleType("bcc")
+    with (
+        patch("blocksnoop.cli.check_austin_available", return_value=False),
+        patch.dict("sys.modules", {"bcc": fake_bcc}),
+    ):
+        # Should NOT raise — stats mode skips the Austin check
+        _validate_environment(stats_mode=True)
 
 
 def test_validate_missing_bcc_error(capsys):
