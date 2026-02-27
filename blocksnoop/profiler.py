@@ -166,7 +166,7 @@ class _LoopspyAustin(ThreadedAustin):
             )
         elif self.sample_count % 100 == 0:
             _logger.debug(
-                "Austin samples: %d accepted, %d filtered (wrong tid), " "buffer=%d/%d",
+                "Austin samples: %d accepted, %d filtered (wrong tid), buffer=%d/%d",
                 self.sample_count,
                 self.filtered_count,
                 self._ring_buffer._count,
