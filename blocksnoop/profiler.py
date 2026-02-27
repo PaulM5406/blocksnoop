@@ -136,14 +136,18 @@ class _LoopspyAustin(ThreadedAustin):
         super().__init__()
         self._ring_buffer = ring_buffer
         self._tid = tid
+        self.sample_count = 0
+        self.filtered_count = 0
 
     def on_sample(self, sample: AustinSample) -> None:
         if sample.frames is None:
             return
         try:
             if int(sample.thread, 16) != self._tid:
+                self.filtered_count += 1
                 return
         except (ValueError, TypeError):
+            self.filtered_count += 1
             return
         frames = tuple(
             StackFrame(function=f.function, file=f.filename, line=f.line)
@@ -153,6 +157,21 @@ class _LoopspyAustin(ThreadedAustin):
             time.monotonic_ns(),
             PythonStackTrace(thread_id=self._tid, thread_name="", frames=frames),
         )
+        self.sample_count += 1
+        if self.sample_count == 1:
+            _logger.debug(
+                "Austin: first sample received (tid=%d, %d frames)",
+                self._tid,
+                len(frames),
+            )
+        elif self.sample_count % 100 == 0:
+            _logger.debug(
+                "Austin samples: %d accepted, %d filtered (wrong tid), " "buffer=%d/%d",
+                self.sample_count,
+                self.filtered_count,
+                self._ring_buffer._count,
+                self._ring_buffer._size,
+            )
 
 
 class AustinSampler:
@@ -171,6 +190,12 @@ class AustinSampler:
         """Spawn Austin and start sampling."""
         if self._austin is not None:
             return
+        _logger.debug(
+            "Starting Austin: pid=%d, tid=%d, interval=%dμs",
+            self._pid,
+            self._tid,
+            self._interval_us,
+        )
         self._austin = _LoopspyAustin(self.ring_buffer, self._tid)
         self._austin.start(
             [
@@ -185,6 +210,12 @@ class AustinSampler:
         """Terminate Austin and wait for the thread."""
         if self._austin is None:
             return
+        _logger.debug(
+            "Stopping Austin (total samples: %d accepted, %d filtered, %d overflows)",
+            self._austin.sample_count,
+            self._austin.filtered_count,
+            self.ring_buffer.overflow_count,
+        )
         try:
             self._austin.terminate()
         except OSError:

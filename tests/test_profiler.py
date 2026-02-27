@@ -130,6 +130,8 @@ def test_loopspy_austin_on_sample_pushes_matching_tid():
     austin = _LoopspyAustin.__new__(_LoopspyAustin)
     austin._ring_buffer = buf
     austin._tid = 0x64  # 100 decimal
+    austin.sample_count = 0
+    austin.filtered_count = 0
 
     sample = _make_austin_sample(
         "64",
@@ -157,6 +159,8 @@ def test_loopspy_austin_on_sample_skips_wrong_tid():
     austin = _LoopspyAustin.__new__(_LoopspyAustin)
     austin._ring_buffer = buf
     austin._tid = 100
+    austin.sample_count = 0
+    austin.filtered_count = 0
 
     sample = _make_austin_sample(
         "ff",
@@ -172,6 +176,8 @@ def test_loopspy_austin_on_sample_skips_no_frames():
     austin = _LoopspyAustin.__new__(_LoopspyAustin)
     austin._ring_buffer = buf
     austin._tid = 100
+    austin.sample_count = 0
+    austin.filtered_count = 0
 
     sample = _make_austin_sample("64", frames=None)
     austin.on_sample(sample)

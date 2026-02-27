@@ -93,4 +93,16 @@ class Correlator:
                     tuple(informative.values()) if informative else tuple(seen.values())
                 )
                 event = replace(event, python_stacks=stacks)
+                _logger.debug(
+                    "Correlation result: %d raw stacks → %d unique → %d informative",
+                    len(all_stacks),
+                    len(seen),
+                    len(informative),
+                )
+        else:
+            _logger.debug(
+                "No stacks found for event (duration=%.1fms, buffer_count=%d)",
+                duration / 1e6,
+                self._ring_buffer._count,
+            )
         self._callback(event)

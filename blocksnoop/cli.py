@@ -20,6 +20,8 @@ from blocksnoop.profiler import (
 from blocksnoop.reporter import Reporter
 from blocksnoop.sinks import ConsoleSink, JsonFileSink, JsonStreamSink, Sink
 
+_logger = logging.getLogger("blocksnoop.cli")
+
 
 def _parse_args(
     argv: list[str] | None = None,
@@ -191,6 +193,7 @@ def main() -> None:
     if command:
         child_process = subprocess.Popen(command)
         pid = child_process.pid
+        _logger.debug("Launched child process: pid=%d, cmd=%s", pid, command)
     else:
         assert target_pid is not None  # guaranteed by validation above
         pid = target_pid
@@ -212,6 +215,16 @@ def main() -> None:
         correlation_padding_ns=int(config.correlation_padding_ms * 1_000_000),
     )
     detector = EbpfDetector(config=config, callback=correlator.on_event)
+
+    _logger.debug(
+        "Pipeline ready: pid=%d, tid=%d, threshold=%.0fms, "
+        "sample_interval=%.0fms, correlation_padding=%.0fms",
+        config.pid,
+        config.tid,
+        config.threshold_ms,
+        config.sample_interval_ms,
+        config.correlation_padding_ms,
+    )
 
     start_time = time.monotonic()
     sampler.start()

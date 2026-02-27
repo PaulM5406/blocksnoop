@@ -2,11 +2,14 @@
 
 from __future__ import annotations
 
+import logging
 import time
 from collections.abc import Sequence
 
 from blocksnoop.core import BlockingEvent
 from blocksnoop.sinks import ConsoleSink, Sink
+
+_logger = logging.getLogger("blocksnoop.reporter")
 
 
 class Reporter:
@@ -18,6 +21,10 @@ class Reporter:
     def report(self, event: BlockingEvent) -> None:
         """Build a record dict and emit to all sinks."""
         self._event_count += 1
+        if self._event_count == 1:
+            _logger.debug(
+                "First blocking event reported (duration=%.1fms)", event.duration_ms
+            )
         elapsed_s = time.monotonic() - self._start_time
 
         python_stacks: list[list[dict]] | None = None

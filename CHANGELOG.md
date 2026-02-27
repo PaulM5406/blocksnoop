@@ -1,5 +1,13 @@
 # Changelog
 
+## [v0.3.0] - 2026-02-27
+
+### Added
+
+- Comprehensive verbose logging (`-v`) across the full pipeline: CLI startup banner, Austin sampling stats, correlation results, eBPF thread lifecycle
+- Austin sample counters (accepted/filtered/overflow) logged periodically and at shutdown
+- Diagnostic log when no Python stacks are found for a blocking event, with buffer fill level for quick troubleshooting
+
 ## [v0.2.0] - 2026-02-26
 
 ### Added

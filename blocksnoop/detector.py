@@ -151,12 +151,14 @@ class EbpfDetector:
         self._stop_event.clear()
         self._thread = threading.Thread(target=self._poll_loop, daemon=True)
         self._thread.start()
+        _logger.debug("eBPF polling thread started (pid=%d)", self._config.pid)
 
     def stop(self) -> None:
         self._stop_event.set()
         if self._thread is not None:
             self._thread.join()
             self._thread = None
+        _logger.debug("eBPF polling thread stopped")
 
     def _poll_loop(self) -> None:
         while not self._stop_event.is_set():
