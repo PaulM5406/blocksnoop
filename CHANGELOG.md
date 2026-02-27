@@ -1,5 +1,12 @@
 # Changelog
 
+## [v0.5.1] - 2026-02-27
+
+### Fixed
+
+- PID namespace mismatch: use `bpf_get_ns_current_pid_tgid()` (kernel 5.7+) so container-local PIDs are resolved correctly without `hostPID: true`
+- Stats display corruption when child stdout interleaves or line count changes between empty and data states (fixed line count + output to stderr)
+
 ## [v0.5.0] - 2026-02-27
 
 ### Added

@@ -32,7 +32,7 @@ class StatsCollector:
         pid: int,
         *,
         json_mode: bool = False,
-        stream: IO[str] = sys.stdout,
+        stream: IO[str] = sys.stderr,
     ) -> None:
         self._pid = pid
         self._json_mode = json_mode
@@ -105,18 +105,24 @@ class StatsCollector:
         )
         lines.append("")
 
-        if count == 0:
-            lines.append("  (no events yet)")
-        else:
+        stat_labels = ("min", "avg", "p50", "p90", "p95", "p99", "max")
+        if count > 0:
             d = self._durations
             avg = sum(d) / count
-            lines.append(f"  min    {d[0]:10.1f}ms")
-            lines.append(f"  avg    {avg:10.1f}ms")
-            lines.append(f"  p50    {_percentile(d, 0.50):10.1f}ms")
-            lines.append(f"  p90    {_percentile(d, 0.90):10.1f}ms")
-            lines.append(f"  p95    {_percentile(d, 0.95):10.1f}ms")
-            lines.append(f"  p99    {_percentile(d, 0.99):10.1f}ms")
-            lines.append(f"  max    {d[-1]:10.1f}ms")
+            values: tuple[float, ...] = (
+                d[0],
+                avg,
+                _percentile(d, 0.50),
+                _percentile(d, 0.90),
+                _percentile(d, 0.95),
+                _percentile(d, 0.99),
+                d[-1],
+            )
+            for label, val in zip(stat_labels, values):
+                lines.append(f"  {label:<5}  {val:10.1f}ms")
+        else:
+            for label in stat_labels:
+                lines.append(f"  {label:<5}  {'---':>10}ms")
 
         if warned:
             lines.append("")

@@ -104,6 +104,15 @@ def _detect_epoll_syscall() -> str:
     )
 
 
+def _get_pidns_info() -> tuple[int, int] | None:
+    """Return (st_dev, st_ino) of /proc/self/ns/pid, or None on failure."""
+    try:
+        st = os.stat("/proc/self/ns/pid")
+        return (st.st_dev, st.st_ino)
+    except OSError:
+        return None
+
+
 class _BpfEvent(ctypes.Structure):
     _fields_ = [
         ("start_ns", ctypes.c_uint64),
@@ -138,6 +147,21 @@ class EbpfDetector:
         source = source.replace("__EPOLL_SYSCALL__", epoll_syscall)
         if epoll_syscall != "epoll_wait":
             source = source.replace("#ifdef __NEEDS_SIGSET_T__", "#if 1")
+
+        pidns_info = _get_pidns_info()
+        if pidns_info is not None:
+            dev, ino = pidns_info
+            source = "#define __USE_NS_PID__\n" + source
+            source = source.replace("__PIDNS_DEV__", str(dev))
+            source = source.replace("__PIDNS_INO__", str(ino))
+            _logger.debug(
+                "Using PID-namespace-aware filtering (dev=%d, ino=%d)", dev, ino
+            )
+        else:
+            _logger.warning(
+                "PID namespace translation unavailable"
+                " \u2014 ensure hostPID or matching namespace"
+            )
 
         _ensure_kernel_headers()
 

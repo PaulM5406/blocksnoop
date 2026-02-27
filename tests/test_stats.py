@@ -5,6 +5,7 @@ from __future__ import annotations
 import array
 import io
 import json
+import sys
 import threading
 
 from blocksnoop.core import BlockingEvent
@@ -74,7 +75,9 @@ def test_print_stats_console_empty():
     c._print_stats()
     output = buf.getvalue()
     assert "PID 42" in output
-    assert "(no events yet)" in output
+    assert "---" in output
+    assert "min" in output
+    assert "max" in output
 
 
 def test_print_stats_console_with_data():
@@ -108,6 +111,30 @@ def test_print_stats_console_overwrites():
     c._print_stats()
     second_output = buf.getvalue()[len(first_output) :]
     assert "\033[" in second_output  # cursor-up on second print
+
+
+def test_default_stream_is_stderr():
+    """Default stream is stderr to avoid interleaving with child stdout."""
+    c = StatsCollector(pid=1)
+    assert c._stream is sys.stderr
+
+
+def test_fixed_line_count():
+    """Empty and with-data states produce the same number of display lines."""
+    buf_empty = io.StringIO()
+    c_empty = StatsCollector(pid=1, stream=buf_empty)
+    c_empty._start_time = 0.0
+    c_empty._print_stats()
+
+    buf_data = io.StringIO()
+    c_data = StatsCollector(pid=1, stream=buf_data)
+    c_data._start_time = 0.0
+    c_data.on_event(_make_event(5.0))
+    c_data._print_stats()
+
+    empty_lines = buf_empty.getvalue().rstrip("\n").split("\n")
+    data_lines = buf_data.getvalue().rstrip("\n").split("\n")
+    assert len(empty_lines) == len(data_lines) == 9
 
 
 # ---------------------------------------------------------------------------

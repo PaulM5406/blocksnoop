@@ -192,6 +192,8 @@ docker compose run --rm blocksnoop blocksnoop -t 100 -- python app.py
 
 blocksnoop uses eBPF which operates at the kernel level, so you run it on the **node**, not inside the application container. The target process just needs to be visible from the host PID namespace.
 
+> **Note:** On kernel 5.7+, blocksnoop automatically translates PID namespaces, so container-local PIDs (e.g. PID 1 inside a pod) are resolved correctly without `hostPID: true`. On older kernels, the target process must be visible from the host PID namespace.
+
 ### Ephemeral debug container (recommended)
 
 Attach directly to a running pod with an ephemeral container. `--profile=sysadmin` (K8s 1.28+) grants the privileged access required for eBPF:

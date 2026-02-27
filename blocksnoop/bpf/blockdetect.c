@@ -18,9 +18,17 @@ BPF_PERF_OUTPUT(events);
 
 // Hook 1: epoll syscall returns → callbacks about to run
 TRACEPOINT_PROBE(syscalls, sys_exit___EPOLL_SYSCALL__) {
+#ifdef __USE_NS_PID__
+    struct bpf_pidns_info nsdata = {};
+    if (bpf_get_ns_current_pid_tgid(__PIDNS_DEV__, __PIDNS_INO__, &nsdata, sizeof(nsdata)) != 0)
+        return 0;
+    u32 tgid = nsdata.tgid;
+    u32 tid = nsdata.pid;
+#else
     u64 pid_tgid = bpf_get_current_pid_tgid();
     u32 tgid = pid_tgid >> 32;
     u32 tid = (u32)pid_tgid;
+#endif
 
     if (tgid != __TARGET_TGID__)
         return 0;
@@ -32,9 +40,17 @@ TRACEPOINT_PROBE(syscalls, sys_exit___EPOLL_SYSCALL__) {
 
 // Hook 2: entering epoll syscall → callbacks done
 TRACEPOINT_PROBE(syscalls, sys_enter___EPOLL_SYSCALL__) {
+#ifdef __USE_NS_PID__
+    struct bpf_pidns_info nsdata = {};
+    if (bpf_get_ns_current_pid_tgid(__PIDNS_DEV__, __PIDNS_INO__, &nsdata, sizeof(nsdata)) != 0)
+        return 0;
+    u32 tgid = nsdata.tgid;
+    u32 tid = nsdata.pid;
+#else
     u64 pid_tgid = bpf_get_current_pid_tgid();
     u32 tgid = pid_tgid >> 32;
     u32 tid = (u32)pid_tgid;
+#endif
 
     if (tgid != __TARGET_TGID__)
         return 0;

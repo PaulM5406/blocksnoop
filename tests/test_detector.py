@@ -155,3 +155,27 @@ def test_no_headers_found_warns(tmp_path: Path, caplog: object) -> None:
         _ensure_kernel_headers()
 
     assert "No kernel headers found" in caplog.text  # type: ignore[union-attr]
+
+
+# ---------------------------------------------------------------------------
+# _get_pidns_info
+# ---------------------------------------------------------------------------
+
+
+def test_get_pidns_info_returns_dev_ino() -> None:
+    """_get_pidns_info returns (st_dev, st_ino) from /proc/self/ns/pid."""
+    from blocksnoop.detector import _get_pidns_info
+
+    mock_result = type("stat_result", (), {"st_dev": 3, "st_ino": 4026531836})()
+    with patch("blocksnoop.detector.os.stat", return_value=mock_result):
+        result = _get_pidns_info()
+    assert result == (3, 4026531836)
+
+
+def test_get_pidns_info_returns_none_on_failure() -> None:
+    """_get_pidns_info returns None when /proc/self/ns/pid is unavailable."""
+    from blocksnoop.detector import _get_pidns_info
+
+    with patch("blocksnoop.detector.os.stat", side_effect=OSError("No such file")):
+        result = _get_pidns_info()
+    assert result is None
