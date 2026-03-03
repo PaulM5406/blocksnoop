@@ -8,7 +8,7 @@ import shutil
 import threading
 import time
 
-from austin.stats import AustinSample
+from austin.stats import AustinMetadata, AustinSample
 from austin.threads import ThreadedAustin
 
 from blocksnoop.core import PythonStackTrace, StackFrame
@@ -139,6 +139,21 @@ class _LoopspyAustin(ThreadedAustin):
         self.sample_count = 0
         self.filtered_count = 0
 
+    def on_metadata(self, metadata: AustinMetadata) -> None:
+        _logger.debug("Austin metadata: %s=%s", metadata.name, metadata.value)
+
+    def on_terminate(self) -> None:
+        _logger.debug(
+            "Austin terminated (samples: %d accepted, %d filtered)",
+            self.sample_count,
+            self.filtered_count,
+        )
+        if self.sample_count == 0:
+            _logger.warning(
+                "Austin produced no samples — stack traces will be unavailable. "
+                "Ensure the target is a Python process and ptrace is allowed."
+            )
+
     def on_sample(self, sample: AustinSample) -> None:
         if sample.frames is None:
             return
@@ -185,6 +200,7 @@ class AustinSampler:
         self._interval_us = int(sample_interval_ms * 1000)
         self.ring_buffer = StackRingBuffer()
         self._austin: _LoopspyAustin | None = None
+        self._health_timer: threading.Timer | None = None
 
     def start(self) -> None:
         """Spawn Austin and start sampling."""
@@ -205,9 +221,24 @@ class AustinSampler:
                 str(self._pid),
             ]
         )
+        self._health_timer = threading.Timer(3.0, self._check_health)
+        self._health_timer.daemon = True
+        self._health_timer.start()
+
+    def _check_health(self) -> None:
+        if self._austin is not None and self._austin.sample_count == 0:
+            _logger.warning(
+                "Austin has not produced any samples after 3s. "
+                "Check that the target process (pid=%d) is a Python process "
+                "and that ptrace is allowed.",
+                self._pid,
+            )
 
     def stop(self) -> None:
         """Terminate Austin and wait for the thread."""
+        if self._health_timer is not None:
+            self._health_timer.cancel()
+            self._health_timer = None
         if self._austin is None:
             return
         _logger.debug(
@@ -224,8 +255,10 @@ class AustinSampler:
             _logger.warning("Unexpected error terminating Austin", exc_info=True)
         try:
             self._austin.join(timeout=5)
-        except OSError:
-            _logger.debug("Austin thread already joined")
+        except (OSError, ValueError):
+            # OSError: thread already joined; ValueError: MOJO parser interrupted
+            # during shutdown (broken pipe). Both are expected on Ctrl+C.
+            _logger.debug("Austin thread stopped during shutdown")
         except Exception:
             _logger.warning("Unexpected error joining Austin thread", exc_info=True)
         self._austin = None

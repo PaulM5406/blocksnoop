@@ -1,5 +1,15 @@
 # Changelog
 
+## [v0.5.2] - 2026-03-03
+
+### Added
+
+- Austin lifecycle logging: metadata events on attach, termination summary, and 3-second health check warning when no samples are received
+
+### Fixed
+
+- Clean Ctrl+C shutdown: suppress expected `ValueError` from Austin's MOJO parser when pipe is interrupted
+
 ## [v0.5.1] - 2026-02-27
 
 ### Fixed
