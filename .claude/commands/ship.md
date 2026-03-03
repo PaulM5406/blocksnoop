@@ -34,6 +34,8 @@ Update the version number in both files to match the confirmed version (without 
 - `pyproject.toml` → `version = "X.Y.Z"`
 - `blocksnoop/__init__.py` → `__version__ = "X.Y.Z"`
 
+Then run `uv sync --all-extras --dev` to update `uv.lock` with the new version.
+
 ## 5. Update CHANGELOG.md
 
 The changelog follows the [Keep a Changelog](https://keepachangelog.com/) format. If `CHANGELOG.md` does not exist, create it. Read it before editing.

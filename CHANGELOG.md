@@ -1,5 +1,11 @@
 # Changelog
 
+## [v0.6.2] - 2026-03-03
+
+### Fixed
+
+- nsenter wrapper now also copies the musl dynamic linker into the target container, fixing Austin execution when the target image has no musl runtime (e.g. glibc-only Python images)
+
 ## [v0.6.1] - 2026-03-03
 
 ### Fixed
