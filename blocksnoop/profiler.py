@@ -4,9 +4,12 @@ from __future__ import annotations
 
 import bisect
 import logging
+import os
 import shutil
+import stat
 import threading
 import time
+from pathlib import Path
 
 from austin.errors import AustinError
 from austin.stats import AustinMetadata, AustinSample
@@ -20,6 +23,31 @@ _logger = logging.getLogger("blocksnoop.profiler")
 def check_austin_available() -> bool:
     """Return True if austin binary is found in PATH."""
     return shutil.which("austin") is not None
+
+
+def _in_same_mount_ns(pid: int) -> bool:
+    """Check if the current process shares a mount namespace with *pid*."""
+    try:
+        self_mnt = os.stat("/proc/self/ns/mnt")
+        target_mnt = os.stat(f"/proc/{pid}/ns/mnt")
+        return (self_mnt.st_dev, self_mnt.st_ino) == (
+            target_mnt.st_dev,
+            target_mnt.st_ino,
+        )
+    except OSError:
+        return True  # assume same namespace if we can't check
+
+
+def _create_nsenter_wrapper(pid: int) -> str:
+    """Create a script that runs austin inside the target's mount namespace."""
+    austin_path = shutil.which("austin")
+    if austin_path is None:
+        raise RuntimeError("Austin binary not found")
+    wrapper = f"/tmp/.austin-nsenter-{pid}"
+    with open(wrapper, "w") as f:
+        f.write(f'#!/bin/sh\nexec nsenter -m -t {pid} -- {austin_path} "$@"\n')
+    os.chmod(wrapper, stat.S_IRWXU | stat.S_IRGRP | stat.S_IXGRP)
+    return wrapper
 
 
 class StackRingBuffer:
@@ -202,6 +230,7 @@ class AustinSampler:
         self.ring_buffer = StackRingBuffer()
         self._austin: _LoopspyAustin | None = None
         self._health_timer: threading.Timer | None = None
+        self._nsenter_wrapper: str | None = None
 
     def start(self) -> None:
         """Spawn Austin and start sampling."""
@@ -214,6 +243,16 @@ class AustinSampler:
             self._interval_us,
         )
         self._austin = _LoopspyAustin(self.ring_buffer, self._tid)
+        if not _in_same_mount_ns(self._pid):
+            wrapper = _create_nsenter_wrapper(self._pid)
+            self._nsenter_wrapper = wrapper
+            # Override austin-python's binary_path (a cached_property) so it
+            # uses our nsenter wrapper instead of the bare austin binary.
+            self._austin.__dict__["binary_path"] = Path(wrapper)
+            _logger.debug(
+                "Using nsenter to access target mount namespace (pid=%d)",
+                self._pid,
+            )
         self._austin.start(
             [
                 "-i",
@@ -263,3 +302,9 @@ class AustinSampler:
         except Exception:
             _logger.warning("Unexpected error joining Austin thread", exc_info=True)
         self._austin = None
+        if self._nsenter_wrapper is not None:
+            try:
+                os.unlink(self._nsenter_wrapper)
+            except OSError:
+                pass
+            self._nsenter_wrapper = None

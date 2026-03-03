@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "blocksnoop"
-version = "0.5.3"
+version = "0.6.0"
 description = "Detect blocking calls in asyncio event loops using eBPF + Austin"
 readme = "README.md"
 authors = [{name = "Paul Milesi"}]

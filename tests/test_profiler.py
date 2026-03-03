@@ -10,6 +10,7 @@ from blocksnoop.profiler import (
     AustinSampler,
     StackRingBuffer,
     _LoopspyAustin,
+    _in_same_mount_ns,
     check_austin_available,
 )
 
@@ -297,3 +298,33 @@ def test_ring_buffer_overflow_logs_warning(caplog):
     with caplog.at_level(logging.WARNING, logger="blocksnoop.profiler"):
         buf.push(400, _make_stack())
     assert len(caplog.records) == 0
+
+
+# ---------------------------------------------------------------------------
+# Mount namespace detection
+# ---------------------------------------------------------------------------
+
+
+def test_in_same_mount_ns_same():
+    """Returns True when both stat results match."""
+    mock_stat = type("stat_result", (), {"st_dev": 3, "st_ino": 100})()
+    with patch("blocksnoop.profiler.os.stat", return_value=mock_stat):
+        assert _in_same_mount_ns(1234) is True
+
+
+def test_in_same_mount_ns_different():
+    """Returns False when stat results differ."""
+    self_stat = type("stat_result", (), {"st_dev": 3, "st_ino": 100})()
+    target_stat = type("stat_result", (), {"st_dev": 3, "st_ino": 200})()
+
+    def mock_stat(path: str) -> object:
+        return self_stat if "self" in path else target_stat
+
+    with patch("blocksnoop.profiler.os.stat", side_effect=mock_stat):
+        assert _in_same_mount_ns(1234) is False
+
+
+def test_in_same_mount_ns_oserror():
+    """Returns True (assume same) when /proc namespace files are unavailable."""
+    with patch("blocksnoop.profiler.os.stat", side_effect=OSError):
+        assert _in_same_mount_ns(1234) is True

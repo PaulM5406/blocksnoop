@@ -1,5 +1,11 @@
 # Changelog
 
+## [v0.6.0] - 2026-03-03
+
+### Added
+
+- Auto-detect mount namespace mismatch and wrap Austin with `nsenter -m` so stack profiling works in cross-container scenarios (e.g. `kubectl debug`)
+
 ## [v0.5.3] - 2026-03-03
 
 ### Fixed
