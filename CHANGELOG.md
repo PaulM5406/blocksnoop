@@ -1,5 +1,11 @@
 # Changelog
 
+## [v0.6.1] - 2026-03-03
+
+### Fixed
+
+- nsenter wrapper now copies Austin binary into target container's filesystem, fixing `No such file or directory` when profiling across mount namespaces (e.g. `kubectl debug`)
+
 ## [v0.6.0] - 2026-03-03
 
 ### Added
