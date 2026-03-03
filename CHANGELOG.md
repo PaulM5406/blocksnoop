@@ -1,5 +1,12 @@
 # Changelog
 
+## [v0.5.3] - 2026-03-03
+
+### Fixed
+
+- Docker: Austin binary now works on Debian Bookworm (switched to musl build + installed musl runtime)
+- Clean shutdown when Austin fails to start (`AustinError` no longer logs tracebacks)
+
 ## [v0.5.2] - 2026-03-03
 
 ### Added

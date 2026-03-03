@@ -8,6 +8,7 @@ import shutil
 import threading
 import time
 
+from austin.errors import AustinError
 from austin.stats import AustinMetadata, AustinSample
 from austin.threads import ThreadedAustin
 
@@ -249,15 +250,15 @@ class AustinSampler:
         )
         try:
             self._austin.terminate()
-        except OSError:
+        except (OSError, AustinError):
             _logger.debug("Austin process already terminated")
         except Exception:
             _logger.warning("Unexpected error terminating Austin", exc_info=True)
         try:
             self._austin.join(timeout=5)
-        except (OSError, ValueError):
+        except (OSError, ValueError, AustinError):
             # OSError: thread already joined; ValueError: MOJO parser interrupted
-            # during shutdown (broken pipe). Both are expected on Ctrl+C.
+            # during shutdown; AustinError: Austin failed to start or already exited.
             _logger.debug("Austin thread stopped during shutdown")
         except Exception:
             _logger.warning("Unexpected error joining Austin thread", exc_info=True)
