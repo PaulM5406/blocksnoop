@@ -1,5 +1,17 @@
 # Changelog
 
+## [v0.7.0] - 2026-05-12
+
+### Changed
+
+- Cross-namespace Austin attach no longer writes any files into the target container — uses shell fd redirection (`/proc/self/fd/N`) instead of copying the Austin binary and musl linker into the target's rootfs. Works against hardened targets with `readOnlyRootFilesystem: true`, regardless of the target's libc (alpine/musl, debian/glibc, distroless).
+
+### Added
+
+- README section documenting cross-container attach behavior and constraints
+- `examples/reproduce-cross-ns.sh`: runnable Docker reproduction of the cross-mount-namespace attach scenario
+- `.mise.toml`: uv integration for local development
+
 ## [v0.6.2] - 2026-03-03
 
 ### Fixed
