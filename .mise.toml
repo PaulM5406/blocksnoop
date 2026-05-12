@@ -1,2 +1,9 @@
 [tools]
 python = "3.13"
+uv = "latest"
+
+[env]
+_.python.venv = { path = ".venv", create = true }
+UV_PROJECT_ENVIRONMENT = "{{ config_root }}/.venv"
+UV_PYTHON = "3.13"
+VIRTUAL_ENV_PROMPT = "blocksnoop"

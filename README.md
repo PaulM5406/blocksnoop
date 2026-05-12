@@ -227,6 +227,21 @@ blocksnoop --json -t 50 <PID>
 
 blocksnoop automatically detects and symlinks available kernel headers when the running kernel differs from the installed headers package (common in containers).
 
+### Cross-container attach (different mount namespaces)
+
+When blocksnoop runs from a sidecar, ephemeral debug container, or a privileged Job pinned to the target's node, it lives in a *different mount namespace* than the target — so the Python binary paths Austin reads from `/proc/<pid>/maps` (e.g. `/usr/local/bin/python3.11`) don't exist in blocksnoop's filesystem. Without help, Austin then logs `🔢 Cannot determine the version of the Python interpreter.` and produces zero samples.
+
+blocksnoop handles this automatically: when the target's mount namespace differs from blocksnoop's, it generates a thin wrapper that opens `austin` (and the musl linker) as file descriptors in its own namespace, then `nsenter`s into the target and execs via `/proc/self/fd/N`. fds survive `execve`, so Austin loads from blocksnoop's rootfs while sampling against the target's filesystem view.
+
+This means:
+
+- The target image is **never** modified — no binaries copied, no files written under `/proc/<TARGET>/root/`.
+- Works against hardened targets with `readOnlyRootFilesystem: true`.
+- Works regardless of the target's libc (alpine/musl, debian/glibc, distroless).
+- Requires `CAP_SYS_ADMIN` on the blocksnoop side (already granted by `--profile=sysadmin` or `privileged: true`).
+
+See `examples/reproduce-cross-ns.sh` for a runnable Docker reproduction.
+
 ### DaemonSet sidecar
 
 For continuous monitoring, deploy blocksnoop as a DaemonSet that monitors processes on each node:
