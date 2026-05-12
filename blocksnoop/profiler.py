@@ -45,46 +45,38 @@ def _find_musl_linker() -> str | None:
     return matches[0] if matches else None
 
 
-def _create_nsenter_wrapper(pid: int) -> tuple[str, list[str]]:
+def _create_nsenter_wrapper(pid: int) -> str:
     """Create a script that runs austin inside the target's mount namespace.
 
-    Copies the austin binary (and musl dynamic linker if needed) into the
-    target's filesystem via ``/proc/{pid}/root`` so they remain accessible
-    after nsenter switches mount namespaces.
+    Uses shell fd redirection to open the austin binary (and the musl dynamic
+    linker, if austin needs one) in *blocksnoop's* mount namespace, then
+    `nsenter`s into the target and execs via ``/proc/self/fd/N``. fds opened
+    by shell redirection are inherited across ``execve`` (no CLOEXEC), and
+    ``/proc/self/fd`` is namespace-agnostic — so austin loads from
+    blocksnoop's rootfs while running with the target's filesystem view.
 
-    Returns ``(wrapper_path, list_of_copied_files)`` for cleanup.
+    Nothing is written to the target's filesystem.
     """
     austin_path = shutil.which("austin")
     if austin_path is None:
         raise RuntimeError("Austin binary not found")
 
-    target_root = f"/proc/{pid}/root/tmp"
-    copied: list[str] = []
-
-    # Copy austin binary into the target's /tmp
-    target_austin = f"{target_root}/.austin-blocksnoop"
-    shutil.copy2(austin_path, target_austin)
-    os.chmod(target_austin, stat.S_IRWXU | stat.S_IRGRP | stat.S_IXGRP)
-    copied.append(target_austin)
-
-    # Austin may be dynamically linked against musl — copy the linker too
-    # so it can execute inside the target's mount namespace.
     musl_linker = _find_musl_linker()
-    austin_cmd = "/tmp/.austin-blocksnoop"
+    lines = ["#!/bin/sh", f"exec 3<{austin_path}"]
     if musl_linker is not None:
-        target_linker = f"{target_root}/.ld-musl-blocksnoop.so.1"
-        shutil.copy2(musl_linker, target_linker)
-        os.chmod(target_linker, stat.S_IRWXU | stat.S_IRGRP | stat.S_IXGRP)
-        copied.append(target_linker)
-        # Invoke austin via the musl linker to avoid dependency on target's libc
-        austin_cmd = "/tmp/.ld-musl-blocksnoop.so.1 /tmp/.austin-blocksnoop"
-        _logger.debug("Copied musl linker to target filesystem")
+        lines.append(f"exec 4<{musl_linker}")
+        # Invoke austin via the musl linker so we don't depend on the target
+        # having a compatible libc/linker installed.
+        austin_invocation = "/proc/self/fd/4 /proc/self/fd/3"
+    else:
+        austin_invocation = "/proc/self/fd/3"
+    lines.append(f'exec nsenter -m -t {pid} -- {austin_invocation} "$@"')
 
     wrapper = f"/tmp/.austin-nsenter-{pid}"
     with open(wrapper, "w") as f:
-        f.write(f'#!/bin/sh\nexec nsenter -m -t {pid} -- {austin_cmd} "$@"\n')
+        f.write("\n".join(lines) + "\n")
     os.chmod(wrapper, stat.S_IRWXU | stat.S_IRGRP | stat.S_IXGRP)
-    return wrapper, copied
+    return wrapper
 
 
 class StackRingBuffer:
@@ -268,7 +260,6 @@ class AustinSampler:
         self._austin: _LoopspyAustin | None = None
         self._health_timer: threading.Timer | None = None
         self._nsenter_wrapper: str | None = None
-        self._nsenter_copies: list[str] = []
 
     def start(self) -> None:
         """Spawn Austin and start sampling."""
@@ -282,9 +273,8 @@ class AustinSampler:
         )
         self._austin = _LoopspyAustin(self.ring_buffer, self._tid)
         if not _in_same_mount_ns(self._pid):
-            wrapper, copies = _create_nsenter_wrapper(self._pid)
+            wrapper = _create_nsenter_wrapper(self._pid)
             self._nsenter_wrapper = wrapper
-            self._nsenter_copies = copies
             # Override austin-python's binary_path (a cached_property) so it
             # uses our nsenter wrapper instead of the bare austin binary.
             self._austin.__dict__["binary_path"] = Path(wrapper)
@@ -341,11 +331,9 @@ class AustinSampler:
         except Exception:
             _logger.warning("Unexpected error joining Austin thread", exc_info=True)
         self._austin = None
-        for path in [self._nsenter_wrapper, *self._nsenter_copies]:
-            if path is not None:
-                try:
-                    os.unlink(path)
-                except OSError:
-                    pass
-        self._nsenter_wrapper = None
-        self._nsenter_copies = []
+        if self._nsenter_wrapper is not None:
+            try:
+                os.unlink(self._nsenter_wrapper)
+            except OSError:
+                pass
+            self._nsenter_wrapper = None

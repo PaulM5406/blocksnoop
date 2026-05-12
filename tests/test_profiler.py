@@ -1,6 +1,7 @@
 """Unit tests for blocksnoop.profiler (no root, eBPF, or external tools required)."""
 
 import logging
+import os
 from unittest.mock import patch
 
 from austin.stats import AustinFrame, AustinMetrics, AustinSample
@@ -10,6 +11,7 @@ from blocksnoop.profiler import (
     AustinSampler,
     StackRingBuffer,
     _LoopspyAustin,
+    _create_nsenter_wrapper,
     _in_same_mount_ns,
     check_austin_available,
 )
@@ -328,3 +330,117 @@ def test_in_same_mount_ns_oserror():
     """Returns True (assume same) when /proc namespace files are unavailable."""
     with patch("blocksnoop.profiler.os.stat", side_effect=OSError):
         assert _in_same_mount_ns(1234) is True
+
+
+# ---------------------------------------------------------------------------
+# nsenter wrapper generation
+# ---------------------------------------------------------------------------
+
+
+def _read_wrapper(tmp_path, pid: int) -> str:
+    with open(f"/tmp/.austin-nsenter-{pid}") as f:
+        return f.read()
+
+
+def test_create_nsenter_wrapper_writes_only_to_blocksnoop_tmp(tmp_path):
+    """Wrapper must not write into the target's filesystem (/proc/<pid>/root/...)."""
+    pid = 99001
+    opened: list[str] = []
+    real_open = open
+
+    def tracking_open(path, *args, **kwargs):
+        opened.append(str(path))
+        return real_open(path, *args, **kwargs)
+
+    with (
+        patch("blocksnoop.profiler.shutil.which", return_value="/fake/austin"),
+        patch("blocksnoop.profiler._find_musl_linker", return_value="/fake/ld-musl.so"),
+        patch("blocksnoop.profiler.open", side_effect=tracking_open),
+        patch("blocksnoop.profiler.os.chmod"),
+    ):
+        wrapper = _create_nsenter_wrapper(pid)
+
+    assert wrapper == f"/tmp/.austin-nsenter-{pid}"
+    assert all(f"/proc/{pid}/root" not in p for p in opened), opened
+    os.unlink(wrapper)
+
+
+def test_create_nsenter_wrapper_includes_fd_redirects():
+    """Wrapper script contains fd redirects, nsenter, and exec via /proc/self/fd."""
+    pid = 99002
+    with (
+        patch("blocksnoop.profiler.shutil.which", return_value="/usr/local/bin/austin"),
+        patch(
+            "blocksnoop.profiler._find_musl_linker",
+            return_value="/lib/ld-musl-x86_64.so.1",
+        ),
+    ):
+        wrapper = _create_nsenter_wrapper(pid)
+    try:
+        with open(wrapper) as f:
+            script = f.read()
+        assert script.startswith("#!/bin/sh\n")
+        assert "exec 3</usr/local/bin/austin" in script
+        assert "exec 4</lib/ld-musl-x86_64.so.1" in script
+        assert f"exec nsenter -m -t {pid} --" in script
+        assert "/proc/self/fd/4 /proc/self/fd/3" in script
+        # fd 3 must be opened before nsenter line
+        assert script.index("exec 3<") < script.index("nsenter")
+    finally:
+        os.unlink(wrapper)
+
+
+def test_create_nsenter_wrapper_without_musl_linker():
+    """When austin is static (no linker), the script drops fd 4."""
+    pid = 99003
+    with (
+        patch("blocksnoop.profiler.shutil.which", return_value="/usr/local/bin/austin"),
+        patch("blocksnoop.profiler._find_musl_linker", return_value=None),
+    ):
+        wrapper = _create_nsenter_wrapper(pid)
+    try:
+        with open(wrapper) as f:
+            script = f.read()
+        assert "exec 3</usr/local/bin/austin" in script
+        assert "exec 4<" not in script
+        assert "/proc/self/fd/4" not in script
+        assert f"exec nsenter -m -t {pid} -- /proc/self/fd/3" in script
+    finally:
+        os.unlink(wrapper)
+
+
+def test_create_nsenter_wrapper_raises_when_austin_missing():
+    """RuntimeError when austin is not on PATH."""
+    with patch("blocksnoop.profiler.shutil.which", return_value=None):
+        try:
+            _create_nsenter_wrapper(99004)
+        except RuntimeError as e:
+            assert "Austin" in str(e)
+        else:
+            raise AssertionError("expected RuntimeError")
+
+
+def test_austin_sampler_stop_cleans_up_wrapper_only():
+    """Cross-ns sampler unlinks only the wrapper, never /proc/<pid>/root paths."""
+    pid = 99005
+    unlinked: list[str] = []
+
+    def tracking_unlink(path):
+        unlinked.append(str(path))
+
+    with (
+        patch("blocksnoop.profiler._in_same_mount_ns", return_value=False),
+        patch(
+            "blocksnoop.profiler._create_nsenter_wrapper",
+            return_value=f"/tmp/.austin-nsenter-{pid}",
+        ),
+        patch.object(_LoopspyAustin, "start"),
+        patch.object(_LoopspyAustin, "terminate"),
+        patch.object(_LoopspyAustin, "join"),
+        patch("blocksnoop.profiler.os.unlink", side_effect=tracking_unlink),
+    ):
+        sampler = AustinSampler(pid=pid, sample_interval_ms=33, tid=pid)
+        sampler.start()
+        sampler.stop()
+
+    assert unlinked == [f"/tmp/.austin-nsenter-{pid}"]
