@@ -1,5 +1,11 @@
 # Changelog
 
+## [v0.7.1] - 2026-05-13
+
+### Fixed
+
+- Cross-PID-namespace attach (e.g. `hostPID: true` Job targeting a container with its own PID namespace): the BPF tgid filter was comparing against the host PID while `bpf_get_ns_current_pid_tgid()` returned the namespace-local PID, so every event was filtered out. Austin also received the host PID instead of the container-local one and couldn't attach, with all samples rejected as "wrong tid". The nsenter wrapper now also enters the target's PID namespace (`nsenter -m -p`), and both PID and TID passed to Austin are translated to their namespace-local form (via `/proc/<pid>/status` NSpid).
+
 ## [v0.7.0] - 2026-05-12
 
 ### Changed
