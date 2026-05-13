@@ -78,14 +78,43 @@ def docker_image():
     if check.returncode != 0:
         pytest.skip("Docker daemon not running")
 
-    # Build the image
-    result = subprocess.run(
-        ["docker", "compose", "build"],
-        capture_output=True,
-        text=True,
-        timeout=300,
-    )
-    if result.returncode != 0:
-        pytest.skip(f"Docker build failed: {result.stderr[:500]}")
+    # Build the image — try `docker compose` (v2 plugin) first, fall back to
+    # `docker-compose` (standalone binary) so this works on machines where
+    # either is installed.
+    for compose_cmd in (["docker", "compose"], ["docker-compose"]):
+        if compose_cmd[0] == "docker-compose" and not shutil.which("docker-compose"):
+            continue
+        result = subprocess.run(
+            [*compose_cmd, "build"],
+            capture_output=True,
+            text=True,
+            timeout=300,
+        )
+        if result.returncode == 0:
+            return True
+        # If it's "unknown command" we fall through to the next compose impl;
+        # any other error is a real build failure → skip with diagnostics.
+        if "unknown" not in (result.stderr or "").lower():
+            pytest.skip(f"Docker build failed: {result.stderr[:500]}")
+    pytest.skip("No working `docker compose` or `docker-compose` found")
 
-    return True
+
+@pytest.fixture(scope="session")
+def docker_client():
+    """Return a docker.from_env() client, or skip if Docker is unreachable.
+
+    Used by integration tests that need fine-grained container topology
+    (e.g. `pid_mode="host"` or custom volume/network setup) which the
+    existing subprocess-based `run_blocksnoop_docker` helper doesn't expose.
+    """
+    try:
+        import docker  # type: ignore[import-not-found]
+    except ImportError:
+        pytest.skip("docker SDK not installed (add to dev deps)")
+
+    try:
+        client = docker.from_env()
+        client.ping()
+    except Exception as exc:  # noqa: BLE001 — any failure means we skip
+        pytest.skip(f"Docker daemon not reachable via SDK: {exc}")
+    return client
