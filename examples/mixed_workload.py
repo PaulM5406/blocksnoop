@@ -161,7 +161,7 @@ async def ingest_worker() -> None:
 
         # Fast sync — OK
         payload = json.dumps({"items": items, "id": "batch-001"})
-        parsed = quick_parse_payload(payload)
+        quick_parse_payload(payload)
         checksum = quick_hash_md5(payload)
         quick_cache_set(f"ingest:{checksum}", payload)
         quick_write_temp_file(payload)
@@ -169,7 +169,7 @@ async def ingest_worker() -> None:
 
         # Async I/O — OK, uses to_thread (I/O-bound, releases GIL)
         await async_notify("ingest", f"batch ready: {len(payload)} bytes")
-        print(f"[ingest] notified (async I/O, OK)")
+        print("[ingest] notified (async I/O, OK)")
 
         # Slow sync — FLAGGED
         compressed = slow_compress(payload)  # BUG: CPU-bound, GIL blocks loop
@@ -196,7 +196,9 @@ async def auth_worker() -> None:
         print("[auth] updated session (async I/O, OK)")
 
         # Slow sync — FLAGGED
-        token = slow_hash_token("user-session-abc123")  # BUG: CPU-bound, GIL blocks loop
+        token = slow_hash_token(
+            "user-session-abc123"
+        )  # BUG: CPU-bound, GIL blocks loop
         quick_cache_set("auth:last-token", token)
         print(f"[auth] hashed token -> {token} (sync, BLOCKING)")
 
@@ -227,9 +229,13 @@ async def payment_worker() -> None:
 
 async def main() -> None:
     print("=== Mixed workload: 3 async workers with different blocking bugs ===")
-    print("FLAGGED:     slow_read_from_db (I/O), slow_hash_token (CPU/GIL), slow_compress (CPU/GIL),")
+    print(
+        "FLAGGED:     slow_read_from_db (I/O), slow_hash_token (CPU/GIL), slow_compress (CPU/GIL),"
+    )
     print("             slow_call_payment_api (I/O), slow_write_audit_log (I/O)")
-    print("NOT FLAGGED: quick_* (fast sync), async_db_write/async_notify (to_thread, I/O), fetch_data_async\n")
+    print(
+        "NOT FLAGGED: quick_* (fast sync), async_db_write/async_notify (to_thread, I/O), fetch_data_async\n"
+    )
     await asyncio.gather(
         ingest_worker(),
         auth_worker(),

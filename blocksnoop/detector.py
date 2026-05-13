@@ -104,13 +104,61 @@ def _detect_epoll_syscall() -> str:
     )
 
 
-def _get_pidns_info() -> tuple[int, int] | None:
-    """Return (st_dev, st_ino) of /proc/self/ns/pid, or None on failure."""
+def _resolve_target_ns_tgid(host_pid: int) -> int:
+    """Return the target's TGID *as seen from its own PID namespace*.
+
+    Reads ``NSpid`` from ``/proc/<host_pid>/status``. That line lists the
+    PID at each nested PID namespace level (outermost → innermost). The
+    innermost value is what the kernel's ``bpf_get_ns_current_pid_tgid``
+    helper returns for tasks running in the target's PID namespace, so
+    that's what the BPF filter must compare against.
+
+    Falls back to ``host_pid`` when the file can't be read or no ``NSpid``
+    line exists — i.e. the same-namespace case where host TGID == target
+    TGID, which is also the safe default for old kernels without ``NSpid``.
+    """
     try:
-        st = os.stat("/proc/self/ns/pid")
-        return (st.st_dev, st.st_ino)
+        with open(f"/proc/{host_pid}/status") as f:
+            for line in f:
+                if line.startswith("NSpid:"):
+                    parts = line.split()
+                    if len(parts) >= 2:
+                        return int(parts[-1])
+                    break
     except OSError:
-        return None
+        pass
+    return host_pid
+
+
+def _get_pidns_info(target_pid: int | None = None) -> tuple[int, int] | None:
+    """Return (st_dev, st_ino) of the *target's* PID namespace.
+
+    The eBPF filter compares each event's PID-namespace dev/ino against
+    this pair, so we must use the namespace the target lives in — not
+    blocksnoop's own. When blocksnoop and the target share a PID namespace
+    (e.g. ``docker run --pid=container:<target>``) the two are identical,
+    which is why this distinction didn't matter before.
+
+    When blocksnoop runs in a different PID namespace from the target
+    (e.g. K8s Job with ``hostPID: true`` against a container in its own
+    PID ns), this function reads ``/proc/<target_pid>/ns/pid`` so the
+    eBPF filter matches the target's events and not the (empty) set of
+    events in blocksnoop's own PID namespace.
+
+    Falls back to ``/proc/self/ns/pid`` when no target is provided or the
+    target's namespace file is unreachable.
+    """
+    candidates: list[str] = []
+    if target_pid is not None:
+        candidates.append(f"/proc/{target_pid}/ns/pid")
+    candidates.append("/proc/self/ns/pid")
+    for path in candidates:
+        try:
+            st = os.stat(path)
+            return (st.st_dev, st.st_ino)
+        except OSError:
+            continue
+    return None
 
 
 class _BpfEvent(ctypes.Structure):
@@ -142,13 +190,22 @@ class EbpfDetector:
         threshold_ns = int(config.threshold_ms * 1_000_000)
         epoll_syscall = _detect_epoll_syscall()
         _logger.debug("Using epoll syscall: %s", epoll_syscall)
-        source = source.replace("__TARGET_TGID__", str(config.pid))
         source = source.replace("__THRESHOLD_NS__", str(threshold_ns))
         source = source.replace("__EPOLL_SYSCALL__", epoll_syscall)
         if epoll_syscall != "epoll_wait":
             source = source.replace("#ifdef __NEEDS_SIGSET_T__", "#if 1")
 
-        pidns_info = _get_pidns_info()
+        # `__TARGET_TGID__` is compared against the tgid the BPF program
+        # observes. When `__USE_NS_PID__` is enabled the program uses
+        # `bpf_get_ns_current_pid_tgid()` which returns the *namespace-local*
+        # tgid (e.g. 1 for the main process in a container). We therefore
+        # need to substitute the in-target NSpid here, not the host PID, or
+        # every event gets filtered out. _resolve_target_ns_tgid() returns
+        # the host PID when blocksnoop and target share a PID namespace.
+        target_tgid = _resolve_target_ns_tgid(config.pid)
+        source = source.replace("__TARGET_TGID__", str(target_tgid))
+
+        pidns_info = _get_pidns_info(target_pid=config.pid)
         if pidns_info is not None:
             dev, ino = pidns_info
             source = "#define __USE_NS_PID__\n" + source
