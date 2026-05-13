@@ -37,13 +37,17 @@ _db = sqlite3.connect(":memory:")
 _db.execute("CREATE TABLE users (id INTEGER PRIMARY KEY, name TEXT, email TEXT)")
 _db.execute("CREATE TABLE logs  (id INTEGER PRIMARY KEY, message TEXT, ts REAL)")
 for i in range(1, 100):
-    _db.execute("INSERT INTO users VALUES (?, ?, ?)", (i, f"user_{i}", f"user_{i}@example.com"))
+    _db.execute(
+        "INSERT INTO users VALUES (?, ?, ?)", (i, f"user_{i}", f"user_{i}@example.com")
+    )
 _db.commit()
 
 
 def quick_db_lookup(user_id: int) -> dict:
     """Fast sync DB read — under threshold, should NOT be flagged."""
-    row = _db.execute("SELECT id, name, email FROM users WHERE id = ?", (user_id,)).fetchone()
+    row = _db.execute(
+        "SELECT id, name, email FROM users WHERE id = ?", (user_id,)
+    ).fetchone()
     if row:
         return {"id": row[0], "name": row[1], "email": row[2]}
     return {"id": user_id, "name": "unknown", "email": ""}
@@ -80,10 +84,15 @@ def quick_read_config() -> dict:
 # Slow blocking helpers — the underlying work that needs wrapping
 # ---------------------------------------------------------------------------
 
+
 def _slow_db_query(user_id: int) -> dict:
     """Simulates a blocking database call (e.g. remote PostgreSQL over network)."""
     time.sleep(0.2)
-    return {"id": user_id, "name": f"user_{user_id}", "email": f"user_{user_id}@example.com"}
+    return {
+        "id": user_id,
+        "name": f"user_{user_id}",
+        "email": f"user_{user_id}@example.com",
+    }
 
 
 def _slow_hash_password(password: str) -> str:
@@ -113,6 +122,7 @@ def _slow_http_call(url: str) -> dict:
 # CPU-bound work (like _slow_hash_password) is NOT wrapped here because
 # to_thread() would still hold the GIL and block the event loop.
 
+
 async def async_db_query(user_id: int) -> dict:
     """Correct: offloads I/O-bound DB call to a thread."""
     return await asyncio.to_thread(_slow_db_query, user_id)
@@ -132,6 +142,7 @@ async def async_http_call(url: str) -> dict:
 # Async handlers — mix of fast sync (OK), async (OK), and slow sync (BUG)
 # ---------------------------------------------------------------------------
 
+
 async def handle_login(user_id: int, password: str) -> dict:
     """Handler with fast sync, correct async, AND buggy slow sync."""
     # Fast sync — OK
@@ -143,9 +154,11 @@ async def handle_login(user_id: int, password: str) -> dict:
     await async_write_log(f"login start: {user_id}")
 
     # BUG: blocking calls directly on the event loop
-    user = _slow_db_query(user_id)             # BUG: I/O-bound, should use async_db_query
-    hashed = _slow_hash_password(password)      # BUG: CPU-bound, to_thread won't help (GIL)
-    _slow_write_log(f"login success: {user_id}")  # BUG: I/O-bound, should use async_write_log
+    user = _slow_db_query(user_id)  # BUG: I/O-bound, should use async_db_query
+    hashed = _slow_hash_password(password)  # BUG: CPU-bound, to_thread won't help (GIL)
+    _slow_write_log(
+        f"login success: {user_id}"
+    )  # BUG: I/O-bound, should use async_write_log
     return {"user": user["name"], "token": hashed[:16], "valid_email": valid}
 
 
@@ -188,6 +201,7 @@ async def handle_search(query: str) -> dict:
 # Simulated request loop (replaces uvicorn for this demo)
 # ---------------------------------------------------------------------------
 
+
 async def simulate_requests() -> None:
     """Simulate incoming HTTP requests in a loop."""
     request_id = 0
@@ -213,8 +227,12 @@ async def simulate_requests() -> None:
 
 async def main() -> None:
     print("=== Simulated FastAPI server (with blocking bugs) ===")
-    print("FLAGGED:     _slow_db_query, _slow_hash_password (CPU, GIL), _slow_write_log, _slow_http_call")
-    print("NOT FLAGGED: quick_* (fast sync), async_db_query/async_write_log/async_http_call (to_thread, I/O)\n")
+    print(
+        "FLAGGED:     _slow_db_query, _slow_hash_password (CPU, GIL), _slow_write_log, _slow_http_call"
+    )
+    print(
+        "NOT FLAGGED: quick_* (fast sync), async_db_query/async_write_log/async_http_call (to_thread, I/O)\n"
+    )
     await simulate_requests()
 
 

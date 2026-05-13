@@ -13,6 +13,7 @@ from blocksnoop.profiler import (
     _LoopspyAustin,
     _create_nsenter_wrapper,
     _in_same_mount_ns,
+    _resolve_ns_pid,
     check_austin_available,
 )
 
@@ -382,7 +383,11 @@ def test_create_nsenter_wrapper_includes_fd_redirects():
         assert script.startswith("#!/bin/sh\n")
         assert "exec 3</usr/local/bin/austin" in script
         assert "exec 4</lib/ld-musl-x86_64.so.1" in script
-        assert f"exec nsenter -m -t {pid} --" in script
+        # Both mount AND PID namespaces must be entered: `-m` for the target's
+        # filesystem view, `-p` so /proc (bound to the target's PID ns) can
+        # resolve /proc/self/fd/N for the caller. Without `-p`, the caller's
+        # host PID isn't visible in the target's /proc and the execve fails.
+        assert f"exec nsenter -m -p -t {pid} --" in script
         assert "/proc/self/fd/4 /proc/self/fd/3" in script
         # fd 3 must be opened before nsenter line
         assert script.index("exec 3<") < script.index("nsenter")
@@ -404,7 +409,7 @@ def test_create_nsenter_wrapper_without_musl_linker():
         assert "exec 3</usr/local/bin/austin" in script
         assert "exec 4<" not in script
         assert "/proc/self/fd/4" not in script
-        assert f"exec nsenter -m -t {pid} -- /proc/self/fd/3" in script
+        assert f"exec nsenter -m -p -t {pid} -- /proc/self/fd/3" in script
     finally:
         os.unlink(wrapper)
 
@@ -444,3 +449,143 @@ def test_austin_sampler_stop_cleans_up_wrapper_only():
         sampler.stop()
 
     assert unlinked == [f"/tmp/.austin-nsenter-{pid}"]
+
+
+# ---------------------------------------------------------------------------
+# PID namespace translation
+# ---------------------------------------------------------------------------
+
+
+def test_resolve_ns_pid_picks_innermost(tmp_path):
+    """When NSpid lists multiple values, return the deepest (rightmost) one."""
+    status = "Name:\tpython\nNSpid:\t833976\t1\n"
+    mock_open = patch("builtins.open", new=lambda *a, **k: _StringIO(status))
+    with mock_open:
+        assert _resolve_ns_pid(833976) == 1
+
+
+def test_resolve_ns_pid_single_value_returns_pid_unchanged(tmp_path):
+    """Without nested PID ns, NSpid has a single entry == the host PID."""
+    status = "Name:\tpython\nNSpid:\t4242\n"
+    with patch("builtins.open", new=lambda *a, **k: _StringIO(status)):
+        assert _resolve_ns_pid(4242) == 4242
+
+
+def test_resolve_ns_pid_missing_nspid_line_returns_pid(tmp_path):
+    """If /proc/<pid>/status has no NSpid line (very old kernel), fall back to pid."""
+    status = "Name:\tpython\nUmask:\t0022\n"
+    with patch("builtins.open", new=lambda *a, **k: _StringIO(status)):
+        assert _resolve_ns_pid(7777) == 7777
+
+
+def test_resolve_ns_pid_oserror_returns_pid():
+    """If /proc/<pid>/status is unreadable, fall back to pid."""
+    with patch("builtins.open", side_effect=OSError):
+        assert _resolve_ns_pid(1234) == 1234
+
+
+def test_austin_sampler_uses_ns_pid_when_cross_ns():
+    """Cross-ns: Austin must be invoked with the container-local PID, not the host PID.
+
+    Reason: the nsenter wrapper enters the target's PID namespace via `-p`, so
+    Austin sees PIDs as the container does. Passing the host PID would make
+    Austin look for a process that doesn't exist in that namespace.
+    """
+    host_pid = 833976
+    ns_pid = 1
+    start_args: list[list[str]] = []
+
+    def capture_start(self, args):  # noqa: ARG001
+        start_args.append(list(args))
+
+    with (
+        patch("blocksnoop.profiler._in_same_mount_ns", return_value=False),
+        patch(
+            "blocksnoop.profiler._create_nsenter_wrapper",
+            return_value=f"/tmp/.austin-nsenter-{host_pid}",
+        ),
+        patch("blocksnoop.profiler._resolve_ns_pid", return_value=ns_pid),
+        patch.object(_LoopspyAustin, "start", new=capture_start),
+    ):
+        sampler = AustinSampler(pid=host_pid, sample_interval_ms=10, tid=host_pid)
+        sampler.start()
+
+    assert len(start_args) == 1
+    args = start_args[0]
+    assert "-p" in args
+    assert args[args.index("-p") + 1] == str(ns_pid)
+    assert str(host_pid) not in args
+
+
+def test_austin_sampler_filters_on_ns_tid_when_cross_ns():
+    """Cross-ns: _LoopspyAustin must filter on the container-local TID.
+
+    Austin reports samples with thread IDs as the container's PID namespace
+    sees them (e.g. the main thread's tid is 1, not the host TID). If
+    _LoopspyAustin is instantiated with the host TID, every sample is
+    rejected as "wrong tid" and zero samples are accepted — exactly the
+    failure observed on the K8s cluster.
+    """
+    host_pid = 833976
+    ns_pid = 1
+    captured_tids: list[int] = []
+
+    real_init = _LoopspyAustin.__init__
+
+    def capture_init(self, ring_buffer, tid):
+        captured_tids.append(tid)
+        real_init(self, ring_buffer, tid)
+
+    with (
+        patch("blocksnoop.profiler._in_same_mount_ns", return_value=False),
+        patch(
+            "blocksnoop.profiler._create_nsenter_wrapper",
+            return_value=f"/tmp/.austin-nsenter-{host_pid}",
+        ),
+        patch("blocksnoop.profiler._resolve_ns_pid", return_value=ns_pid),
+        patch.object(_LoopspyAustin, "__init__", new=capture_init),
+        patch.object(_LoopspyAustin, "start"),
+    ):
+        sampler = AustinSampler(pid=host_pid, sample_interval_ms=10, tid=host_pid)
+        sampler.start()
+
+    assert captured_tids == [ns_pid], (
+        f"expected _LoopspyAustin to receive container-local tid {ns_pid}, "
+        f"got {captured_tids}"
+    )
+
+
+def test_austin_sampler_uses_host_pid_when_same_ns():
+    """Same mount ns: no namespace crossing, Austin gets the host PID directly."""
+    pid = 4242
+    start_args: list[list[str]] = []
+
+    def capture_start(self, args):  # noqa: ARG001
+        start_args.append(list(args))
+
+    with (
+        patch("blocksnoop.profiler._in_same_mount_ns", return_value=True),
+        patch.object(_LoopspyAustin, "start", new=capture_start),
+    ):
+        sampler = AustinSampler(pid=pid, sample_interval_ms=10, tid=pid)
+        sampler.start()
+
+    assert len(start_args) == 1
+    args = start_args[0]
+    assert "-p" in args
+    assert args[args.index("-p") + 1] == str(pid)
+
+
+# Small in-test helper to avoid an extra import at module top.
+class _StringIO:
+    def __init__(self, data: str) -> None:
+        self._data = data
+
+    def __enter__(self) -> "_StringIO":
+        return self
+
+    def __exit__(self, *exc) -> None:
+        pass
+
+    def __iter__(self):
+        return iter(self._data.splitlines(keepends=True))

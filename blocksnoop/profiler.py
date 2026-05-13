@@ -45,17 +45,51 @@ def _find_musl_linker() -> str | None:
     return matches[0] if matches else None
 
 
+def _resolve_ns_pid(pid: int) -> int:
+    """Return *pid* translated into the deepest PID namespace it belongs to.
+
+    `/proc/<pid>/status` exposes an ``NSpid`` line listing the PID at each
+    nested namespace level, from outermost to innermost. When blocksnoop runs
+    in a different PID namespace from the target (e.g. ``hostPID: true`` Job
+    targeting a container with its own PID namespace), we must pass the
+    innermost PID to Austin — that's the PID Austin will see once we
+    ``nsenter -p`` into the target's PID namespace. If no nesting exists,
+    returns *pid* unchanged.
+    """
+    try:
+        with open(f"/proc/{pid}/status") as f:
+            for line in f:
+                if line.startswith("NSpid:"):
+                    parts = line.split()
+                    # parts = ["NSpid:", outermost, ..., innermost]
+                    if len(parts) >= 2:
+                        return int(parts[-1])
+                    break
+    except OSError:
+        pass
+    return pid
+
+
 def _create_nsenter_wrapper(pid: int) -> str:
-    """Create a script that runs austin inside the target's mount namespace.
+    """Create a script that runs austin inside the target's mount + pid namespaces.
 
     Uses shell fd redirection to open the austin binary (and the musl dynamic
     linker, if austin needs one) in *blocksnoop's* mount namespace, then
-    `nsenter`s into the target and execs via ``/proc/self/fd/N``. fds opened
-    by shell redirection are inherited across ``execve`` (no CLOEXEC), and
-    ``/proc/self/fd`` is namespace-agnostic — so austin loads from
-    blocksnoop's rootfs while running with the target's filesystem view.
+    ``nsenter -m -p``s into the target and execs via ``/proc/self/fd/N``.
 
-    Nothing is written to the target's filesystem.
+    Both namespaces must be entered:
+
+    - ``-m`` so Austin sees the target's filesystem (its Python binary +
+      shared libraries).
+    - ``-p`` so the ``/proc`` mounted inside the target's mount namespace
+      (which is bound to the target's PID namespace) recognises the caller
+      and resolves ``/proc/self/fd/N``. Without ``-p``, ``/proc/self`` has
+      no entry for the caller (its host PID isn't visible in the container's
+      PID namespace) and ``execve("/proc/self/fd/N")`` fails with ENOENT.
+
+    fds opened by shell redirection survive ``execve`` (no CLOEXEC), so
+    Austin loads from blocksnoop's rootfs while running with the target's
+    filesystem and process views. Nothing is written to the target.
     """
     austin_path = shutil.which("austin")
     if austin_path is None:
@@ -70,7 +104,7 @@ def _create_nsenter_wrapper(pid: int) -> str:
         austin_invocation = "/proc/self/fd/4 /proc/self/fd/3"
     else:
         austin_invocation = "/proc/self/fd/3"
-    lines.append(f'exec nsenter -m -t {pid} -- {austin_invocation} "$@"')
+    lines.append(f'exec nsenter -m -p -t {pid} -- {austin_invocation} "$@"')
 
     wrapper = f"/tmp/.austin-nsenter-{pid}"
     with open(wrapper, "w") as f:
@@ -271,23 +305,40 @@ class AustinSampler:
             self._tid,
             self._interval_us,
         )
-        self._austin = _LoopspyAustin(self.ring_buffer, self._tid)
+        austin_pid = self._pid
+        austin_tid = self._tid
+        nsenter_wrapper: str | None = None
         if not _in_same_mount_ns(self._pid):
-            wrapper = _create_nsenter_wrapper(self._pid)
-            self._nsenter_wrapper = wrapper
+            nsenter_wrapper = _create_nsenter_wrapper(self._pid)
+            self._nsenter_wrapper = nsenter_wrapper
+            # The wrapper enters the target's PID namespace via `nsenter -p`,
+            # so Austin sees PIDs/TIDs as the *container* does — small numbers
+            # like 1, not host PIDs. We must translate BOTH:
+            #   - the pid arg passed to Austin (`-p`), or it can't attach
+            #   - the tid used by _LoopspyAustin to filter samples, or every
+            #     sample arrives with the container-local thread id and gets
+            #     rejected as "wrong tid", producing zero accepted samples.
+            austin_pid = _resolve_ns_pid(self._pid)
+            austin_tid = _resolve_ns_pid(self._tid)
+            _logger.debug(
+                "Using nsenter to access target mount+pid namespaces "
+                "(host_pid=%d host_tid=%d, ns_pid=%d ns_tid=%d)",
+                self._pid,
+                self._tid,
+                austin_pid,
+                austin_tid,
+            )
+        self._austin = _LoopspyAustin(self.ring_buffer, austin_tid)
+        if nsenter_wrapper is not None:
             # Override austin-python's binary_path (a cached_property) so it
             # uses our nsenter wrapper instead of the bare austin binary.
-            self._austin.__dict__["binary_path"] = Path(wrapper)
-            _logger.debug(
-                "Using nsenter to access target mount namespace (pid=%d)",
-                self._pid,
-            )
+            self._austin.__dict__["binary_path"] = Path(nsenter_wrapper)
         self._austin.start(
             [
                 "-i",
                 str(self._interval_us),
                 "-p",
-                str(self._pid),
+                str(austin_pid),
             ]
         )
         self._health_timer = threading.Timer(3.0, self._check_health)

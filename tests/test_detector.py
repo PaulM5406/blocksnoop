@@ -163,7 +163,7 @@ def test_no_headers_found_warns(tmp_path: Path, caplog: object) -> None:
 
 
 def test_get_pidns_info_returns_dev_ino() -> None:
-    """_get_pidns_info returns (st_dev, st_ino) from /proc/self/ns/pid."""
+    """_get_pidns_info returns (st_dev, st_ino), defaulting to /proc/self/ns/pid."""
     from blocksnoop.detector import _get_pidns_info
 
     mock_result = type("stat_result", (), {"st_dev": 3, "st_ino": 4026531836})()
@@ -179,3 +179,90 @@ def test_get_pidns_info_returns_none_on_failure() -> None:
     with patch("blocksnoop.detector.os.stat", side_effect=OSError("No such file")):
         result = _get_pidns_info()
     assert result is None
+
+
+def test_get_pidns_info_prefers_target_pid_namespace() -> None:
+    """When a target PID is given, read /proc/<target>/ns/pid so the eBPF filter
+    matches the target's PID namespace (not blocksnoop's).
+
+    Regression: without this, cross-PID-ns runs (e.g. K8s hostPID Job against a
+    container in its own PID namespace) filter out every event because the
+    eBPF program compares each event's namespace ino against blocksnoop's own
+    PID-ns ino, which the target's events never carry.
+    """
+    from blocksnoop.detector import _get_pidns_info
+
+    target_stat = type("stat_result", (), {"st_dev": 4, "st_ino": 4026532001})()
+    self_stat = type("stat_result", (), {"st_dev": 3, "st_ino": 4026531836})()
+
+    def fake_stat(path: str) -> object:
+        return target_stat if "/proc/833976/" in path else self_stat
+
+    with patch("blocksnoop.detector.os.stat", side_effect=fake_stat):
+        result = _get_pidns_info(target_pid=833976)
+    assert result == (4, 4026532001)
+
+
+def test_get_pidns_info_falls_back_to_self_when_target_unreachable() -> None:
+    """If /proc/<target>/ns/pid can't be stat'd, fall back to /proc/self/ns/pid."""
+    from blocksnoop.detector import _get_pidns_info
+
+    self_stat = type("stat_result", (), {"st_dev": 3, "st_ino": 4026531836})()
+
+    def fake_stat(path: str) -> object:
+        if path == "/proc/self/ns/pid":
+            return self_stat
+        raise OSError("not visible")
+
+    with patch("blocksnoop.detector.os.stat", side_effect=fake_stat):
+        result = _get_pidns_info(target_pid=833976)
+    assert result == (3, 4026531836)
+
+
+# ---------------------------------------------------------------------------
+# _resolve_target_ns_tgid
+# ---------------------------------------------------------------------------
+
+
+class _StringIO:
+    """Local helper avoiding an extra module import at top."""
+
+    def __init__(self, data: str) -> None:
+        self._data = data
+
+    def __enter__(self) -> "_StringIO":
+        return self
+
+    def __exit__(self, *exc) -> None:
+        pass
+
+    def __iter__(self):
+        return iter(self._data.splitlines(keepends=True))
+
+
+def test_resolve_target_ns_tgid_picks_innermost() -> None:
+    """NSpid lists outer→inner. Return the innermost value — what the BPF
+    helper `bpf_get_ns_current_pid_tgid` reports for the target's tasks.
+    """
+    from blocksnoop.detector import _resolve_target_ns_tgid
+
+    status = "Name:\tpython\nNSpid:\t833976\t1\n"
+    with patch("builtins.open", new=lambda *a, **k: _StringIO(status)):
+        assert _resolve_target_ns_tgid(833976) == 1
+
+
+def test_resolve_target_ns_tgid_single_value() -> None:
+    """Same-namespace target: NSpid has a single column == host PID."""
+    from blocksnoop.detector import _resolve_target_ns_tgid
+
+    status = "Name:\tpython\nNSpid:\t4242\n"
+    with patch("builtins.open", new=lambda *a, **k: _StringIO(status)):
+        assert _resolve_target_ns_tgid(4242) == 4242
+
+
+def test_resolve_target_ns_tgid_oserror_falls_back_to_host_pid() -> None:
+    """Unreadable status → fall back to host PID (safe default)."""
+    from blocksnoop.detector import _resolve_target_ns_tgid
+
+    with patch("builtins.open", side_effect=OSError):
+        assert _resolve_target_ns_tgid(9999) == 9999
