@@ -18,7 +18,7 @@ eBPF (kernel)          Austin (userspace)
        Reporter → sinks (console, JSON, file)
 ```
 
-1. An **eBPF probe** hooks `epoll_wait` syscalls and measures the time between returns (callback start) and the next entry (callback end). If the gap exceeds the threshold, it emits an event.
+1. An **eBPF probe** hooks the `epoll` syscalls (`epoll_wait`, `epoll_pwait`, `epoll_pwait2` — all of the family available on the kernel) and measures the time between returns (callback start) and the next entry (callback end). If the gap exceeds the threshold, it emits an event. Tracing every variant matters because which one a loop enters depends on its libc and implementation — glibc routes `epoll_wait()` through the `epoll_pwait` syscall, and uvloop/libuv call `epoll_pwait` directly.
 2. A **stack sampler** ([Austin](https://github.com/P403n1x87/austin)) runs as a long-lived subprocess, continuously streaming Python stack traces into a ring buffer. Austin's pipe mode avoids per-sample subprocess overhead, enabling sub-10ms threshold detection.
 3. The **correlator** enriches each blocking event with the closest matching Python stack.
 4. The **reporter** fans out events to one or more output sinks.

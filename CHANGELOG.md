@@ -1,6 +1,10 @@
 # Changelog
 
-## [v0.7.1] - 2026-05-13
+## [v0.7.2] - 2026-06-10
+
+### Fixed
+
+- Detector traced only `epoll_wait` and silently emitted nothing on loops whose event loop enters a different epoll syscall — the "attaches fine, Austin samples, but no events come out" failure. `_detect_epoll_syscall` picked the first syscall whose *tracepoint existed* (always `epoll_wait` on modern kernels) rather than the one the *target* actually calls, so loops on glibc (which routes `epoll_wait()` through the `epoll_pwait` syscall) or uvloop/libuv (which calls `epoll_pwait`/`epoll_pwait2` directly) were never timed. The BPF program now generates a `sys_enter`/`sys_exit` probe pair for **every** epoll variant available on the kernel, sharing one `callback_start` map, so detection is independent of the libc/loop's syscall choice. Reproduced against a production uvloop worker (event loop on `epoll_pwait`, syscall 281).
 
 ### Fixed
 

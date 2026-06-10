@@ -93,15 +93,129 @@ def _merge_common_headers(arch_headers: Path, common_headers: Path) -> None:
         uapi_asm_dst.symlink_to(uapi_asm_src)
 
 
-def _detect_epoll_syscall() -> str:
-    """Return the best available epoll syscall tracepoint name."""
-    for name in _EPOLL_CANDIDATES:
-        if os.path.isdir(os.path.join(_TRACEFS_EVENTS, f"sys_enter_{name}")):
-            return name
-    raise RuntimeError(
-        f"No epoll tracepoint found in {_TRACEFS_EVENTS}. "
-        "Ensure tracefs is mounted and the kernel supports syscall tracepoints."
+def _detect_epoll_syscalls() -> list[str]:
+    """Return every epoll syscall tracepoint available on this kernel.
+
+    We trace *all* available variants instead of guessing one. Which epoll
+    syscall a process's event loop actually enters depends on its libc and
+    loop implementation: glibc routes ``epoll_wait()`` through the
+    ``epoll_pwait`` syscall, and uvloop/libuv call ``epoll_pwait`` (or, on
+    recent kernels, ``epoll_pwait2``) directly. A detector hard-wired to
+    ``epoll_wait`` attaches fine but never fires on those loops — the exact
+    "everything attaches but nothing comes out" failure. Tracing the whole
+    family makes detection independent of that choice; the candidates that
+    don't exist on this kernel are simply skipped so BCC never references a
+    missing tracepoint.
+    """
+    available = [
+        name
+        for name in _EPOLL_CANDIDATES
+        if os.path.isdir(os.path.join(_TRACEFS_EVENTS, f"sys_enter_{name}"))
+    ]
+    if not available:
+        raise RuntimeError(
+            f"No epoll tracepoint found in {_TRACEFS_EVENTS}. "
+            "Ensure tracefs is mounted and the kernel supports syscall tracepoints."
+        )
+    return available
+
+
+# A sys_exit/sys_enter probe pair, instantiated once per available epoll
+# variant and substituted into blockdetect.c's __EPOLL_PROBES__ marker. The
+# tgid/tid resolution and threshold placeholders are filled by
+# _build_bpf_source after all pairs are joined.
+_EPOLL_PROBE_TEMPLATE = r"""
+// __EPOLL_SYSCALL__ returns → callbacks about to run
+TRACEPOINT_PROBE(syscalls, sys_exit___EPOLL_SYSCALL__) {
+#ifdef __USE_NS_PID__
+    struct bpf_pidns_info nsdata = {};
+    if (bpf_get_ns_current_pid_tgid(__PIDNS_DEV__, __PIDNS_INO__, &nsdata, sizeof(nsdata)) != 0)
+        return 0;
+    u32 tgid = nsdata.tgid;
+    u32 tid = nsdata.pid;
+#else
+    u64 pid_tgid = bpf_get_current_pid_tgid();
+    u32 tgid = pid_tgid >> 32;
+    u32 tid = (u32)pid_tgid;
+#endif
+
+    if (tgid != __TARGET_TGID__)
+        return 0;
+
+    u64 ts = bpf_ktime_get_ns();
+    callback_start.update(&tid, &ts);
+    return 0;
+}
+
+// entering __EPOLL_SYSCALL__ → callbacks done
+TRACEPOINT_PROBE(syscalls, sys_enter___EPOLL_SYSCALL__) {
+#ifdef __USE_NS_PID__
+    struct bpf_pidns_info nsdata = {};
+    if (bpf_get_ns_current_pid_tgid(__PIDNS_DEV__, __PIDNS_INO__, &nsdata, sizeof(nsdata)) != 0)
+        return 0;
+    u32 tgid = nsdata.tgid;
+    u32 tid = nsdata.pid;
+#else
+    u64 pid_tgid = bpf_get_current_pid_tgid();
+    u32 tgid = pid_tgid >> 32;
+    u32 tid = (u32)pid_tgid;
+#endif
+
+    if (tgid != __TARGET_TGID__)
+        return 0;
+
+    u64 *tsp = callback_start.lookup(&tid);
+    if (!tsp)
+        return 0;
+
+    u64 now = bpf_ktime_get_ns();
+    u64 delta = now - *tsp;
+
+    if (delta > __THRESHOLD_NS__) {
+        struct event_t evt = {};
+        evt.start_ns = *tsp;
+        evt.end_ns = now;
+        evt.pid = tgid;
+        evt.tid = tid;
+        events.perf_submit(args, &evt, sizeof(evt));
+    }
+
+    callback_start.delete(&tid);
+    return 0;
+}
+"""
+
+
+def _build_bpf_source(
+    raw_source: str,
+    *,
+    threshold_ms: float,
+    target_tgid: int,
+    epoll_syscalls: list[str],
+    pidns_info: tuple[int, int] | None,
+) -> str:
+    """Assemble the final BCC program from blockdetect.c.
+
+    Generates one probe pair per epoll variant, then fills the threshold,
+    target tgid and (optional) PID-namespace placeholders. When *pidns_info*
+    is given, ``__USE_NS_PID__`` is defined so the probes use
+    ``bpf_get_ns_current_pid_tgid`` and compare against the target's
+    namespace-local tgid.
+    """
+    threshold_ns = int(threshold_ms * 1_000_000)
+    probes = "\n".join(
+        _EPOLL_PROBE_TEMPLATE.replace("__EPOLL_SYSCALL__", name)
+        for name in epoll_syscalls
     )
+    source = raw_source.replace("__EPOLL_PROBES__", probes)
+    source = source.replace("__THRESHOLD_NS__", str(threshold_ns))
+    source = source.replace("__TARGET_TGID__", str(target_tgid))
+    if pidns_info is not None:
+        dev, ino = pidns_info
+        source = "#define __USE_NS_PID__\n" + source
+        source = source.replace("__PIDNS_DEV__", str(dev))
+        source = source.replace("__PIDNS_INO__", str(ino))
+    return source
 
 
 def _resolve_target_ns_tgid(host_pid: int) -> int:
@@ -185,15 +299,10 @@ class EbpfDetector:
             os.path.dirname(__file__), "bpf", "blockdetect.c"
         )
         with open(bpf_source_path, "r") as f:
-            source = f.read()
+            raw_source = f.read()
 
-        threshold_ns = int(config.threshold_ms * 1_000_000)
-        epoll_syscall = _detect_epoll_syscall()
-        _logger.debug("Using epoll syscall: %s", epoll_syscall)
-        source = source.replace("__THRESHOLD_NS__", str(threshold_ns))
-        source = source.replace("__EPOLL_SYSCALL__", epoll_syscall)
-        if epoll_syscall != "epoll_wait":
-            source = source.replace("#ifdef __NEEDS_SIGSET_T__", "#if 1")
+        epoll_syscalls = _detect_epoll_syscalls()
+        _logger.debug("Tracing epoll syscalls: %s", ", ".join(epoll_syscalls))
 
         # `__TARGET_TGID__` is compared against the tgid the BPF program
         # observes. When `__USE_NS_PID__` is enabled the program uses
@@ -203,22 +312,25 @@ class EbpfDetector:
         # every event gets filtered out. _resolve_target_ns_tgid() returns
         # the host PID when blocksnoop and target share a PID namespace.
         target_tgid = _resolve_target_ns_tgid(config.pid)
-        source = source.replace("__TARGET_TGID__", str(target_tgid))
 
         pidns_info = _get_pidns_info(target_pid=config.pid)
         if pidns_info is not None:
-            dev, ino = pidns_info
-            source = "#define __USE_NS_PID__\n" + source
-            source = source.replace("__PIDNS_DEV__", str(dev))
-            source = source.replace("__PIDNS_INO__", str(ino))
             _logger.debug(
-                "Using PID-namespace-aware filtering (dev=%d, ino=%d)", dev, ino
+                "Using PID-namespace-aware filtering (dev=%d, ino=%d)", *pidns_info
             )
         else:
             _logger.warning(
                 "PID namespace translation unavailable"
                 " \u2014 ensure hostPID or matching namespace"
             )
+
+        source = _build_bpf_source(
+            raw_source,
+            threshold_ms=config.threshold_ms,
+            target_tgid=target_tgid,
+            epoll_syscalls=epoll_syscalls,
+            pidns_info=pidns_info,
+        )
 
         _ensure_kernel_headers()
 
