@@ -30,9 +30,11 @@ pytestmark = pytest.mark.docker
 
 TARGET_IMAGE = "python:3.11-slim"
 # An asyncio loop with a synchronous blocking call inside (300ms > 100ms
-# threshold). The asyncio runner uses epoll_wait between awaits, which is
-# what blocksnoop's eBPF program watches; a bare `time.sleep` loop without
-# asyncio wouldn't trigger any eBPF events.
+# threshold). The loop sits in an epoll syscall between awaits, which is what
+# blocksnoop's eBPF program watches (the whole epoll family — epoll_wait /
+# epoll_pwait / epoll_pwait2 — so the variant the libc/loop picks doesn't
+# matter); a bare `time.sleep` loop without asyncio wouldn't trigger any
+# eBPF events.
 TARGET_SCRIPT = (
     "import asyncio, time\n"
     "async def main():\n"

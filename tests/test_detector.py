@@ -2,10 +2,20 @@
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 from unittest.mock import patch
 
-from blocksnoop.detector import _ensure_kernel_headers
+from blocksnoop.detector import (
+    _build_bpf_source,
+    _detect_epoll_syscalls,
+    _ensure_kernel_headers,
+)
+
+# Mirrors blockdetect.c — the marker _build_bpf_source replaces with probes.
+_RAW_SOURCE = (
+    "BPF_HASH(callback_start, u32, u64);\nBPF_PERF_OUTPUT(events);\n__EPOLL_PROBES__\n"
+)
 
 
 def _setup_headers(
@@ -266,3 +276,114 @@ def test_resolve_target_ns_tgid_oserror_falls_back_to_host_pid() -> None:
 
     with patch("builtins.open", side_effect=OSError):
         assert _resolve_target_ns_tgid(9999) == 9999
+
+
+# ---------------------------------------------------------------------------
+# _detect_epoll_syscalls
+# ---------------------------------------------------------------------------
+
+
+def _fake_tracefs(*available: str):
+    """Return an os.path.isdir replacement reporting only *available* variants."""
+    present = {
+        os.path.join("/sys/kernel/debug/tracing/events/syscalls", f"sys_enter_{n}")
+        for n in available
+    }
+    return lambda path: path in present
+
+
+def test_detect_epoll_syscalls_returns_all_available() -> None:
+    """Every available variant is traced, in preferred order — not just the first.
+
+    Regression: the loop on a uvloop/glibc target enters epoll_pwait, so a
+    detector that returned only epoll_wait attached but never fired.
+    """
+    with patch(
+        "blocksnoop.detector.os.path.isdir",
+        side_effect=_fake_tracefs("epoll_wait", "epoll_pwait", "epoll_pwait2"),
+    ):
+        assert _detect_epoll_syscalls() == ["epoll_wait", "epoll_pwait", "epoll_pwait2"]
+
+
+def test_detect_epoll_syscalls_skips_missing_variants() -> None:
+    """Variants without a kernel tracepoint are skipped so BCC never references
+    a missing one."""
+    with patch(
+        "blocksnoop.detector.os.path.isdir",
+        side_effect=_fake_tracefs("epoll_wait", "epoll_pwait"),
+    ):
+        assert _detect_epoll_syscalls() == ["epoll_wait", "epoll_pwait"]
+
+
+def test_detect_epoll_syscalls_raises_when_none() -> None:
+    """No epoll tracepoint at all is a hard error (tracefs not mounted)."""
+    import pytest
+
+    with patch("blocksnoop.detector.os.path.isdir", side_effect=_fake_tracefs()):
+        with pytest.raises(RuntimeError, match="No epoll tracepoint"):
+            _detect_epoll_syscalls()
+
+
+# ---------------------------------------------------------------------------
+# _build_bpf_source
+# ---------------------------------------------------------------------------
+
+
+def test_build_bpf_source_emits_a_probe_pair_per_variant() -> None:
+    """Each traced variant gets its own sys_enter/sys_exit probe pair."""
+    source = _build_bpf_source(
+        _RAW_SOURCE,
+        threshold_ms=100,
+        target_tgid=1,
+        epoll_syscalls=["epoll_wait", "epoll_pwait", "epoll_pwait2"],
+        pidns_info=None,
+    )
+    for name in ("epoll_wait", "epoll_pwait", "epoll_pwait2"):
+        assert f"sys_exit_{name}" in source
+        assert f"sys_enter_{name}" in source
+    # No unresolved placeholders survive into the compiled program.
+    assert "__EPOLL_PROBES__" not in source
+    assert "__EPOLL_SYSCALL__" not in source
+    assert "__THRESHOLD_NS__" not in source
+    assert "__TARGET_TGID__" not in source
+
+
+def test_build_bpf_source_substitutes_threshold_and_tgid() -> None:
+    """threshold_ms is converted to ns and the target tgid is inlined."""
+    source = _build_bpf_source(
+        _RAW_SOURCE,
+        threshold_ms=250,
+        target_tgid=4242,
+        epoll_syscalls=["epoll_wait"],
+        pidns_info=None,
+    )
+    assert "250000000" in source  # 250ms → ns
+    assert "4242" in source
+
+
+def test_build_bpf_source_without_pidns_uses_host_pid_path() -> None:
+    """No pidns_info → __USE_NS_PID__ stays undefined (same-namespace path)."""
+    source = _build_bpf_source(
+        _RAW_SOURCE,
+        threshold_ms=100,
+        target_tgid=1,
+        epoll_syscalls=["epoll_wait"],
+        pidns_info=None,
+    )
+    assert "#define __USE_NS_PID__" not in source
+    assert "bpf_get_current_pid_tgid()" in source
+
+
+def test_build_bpf_source_with_pidns_enables_ns_filtering() -> None:
+    """pidns_info → __USE_NS_PID__ defined and dev/ino inlined for the helper."""
+    source = _build_bpf_source(
+        _RAW_SOURCE,
+        threshold_ms=100,
+        target_tgid=1,
+        epoll_syscalls=["epoll_pwait"],
+        pidns_info=(7, 4026532001),
+    )
+    assert source.startswith("#define __USE_NS_PID__\n")
+    assert "bpf_get_ns_current_pid_tgid(7, 4026532001" in source
+    assert "__PIDNS_DEV__" not in source
+    assert "__PIDNS_INO__" not in source
