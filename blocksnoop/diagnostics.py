@@ -6,6 +6,8 @@ import errno
 import importlib.util
 import os
 import re
+import shutil
+import sys
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Literal
@@ -53,10 +55,14 @@ class DoctorReport:
     effective_backend: Backend | None
     checks: tuple[DiagnosticCheck, ...]
     namespace: TargetNamespace | None = None
+    stats_mode: bool = False
 
     def as_dict(self) -> dict[str, object]:
         return {
+            "schema": "blocksnoop.doctor/v1",
             "schema_version": 1,
+            "status": "ready" if self.healthy else "not_ready",
+            "mode": "stats" if self.stats_mode else "capture",
             "requested_backend": self.requested_backend,
             "effective_backend": self.effective_backend,
             "checks": [asdict(check) for check in self.checks],
@@ -69,35 +75,57 @@ class DoctorReport:
 
 
 def collect_diagnostics(
-    backend: Backend, *, target_pid: int | None = None, target_tid: int | None = None
+    backend: Backend,
+    *,
+    target_pid: int | None = None,
+    target_tid: int | None = None,
+    stats_mode: bool = False,
 ) -> DoctorReport:
-    """Inspect prerequisites without spawning a sidecar or attaching BPF."""
+    """Inspect selected-backend prerequisites without attaching BPF.
+
+    ``stats_mode`` mirrors ``blocksnoop --stats``: it intentionally omits
+    Austin because that mode collects only eBPF timing events.  The default
+    capture mode requires Austin, so ``doctor`` is a useful pre-flight check
+    for the actual command rather than merely for its eBPF half.
+    """
     checks: list[DiagnosticCheck] = [
-        _check_path(
-            "btf",
-            Path("/sys/kernel/btf/vmlinux"),
-            "kernel BTF is readable",
-            "Use a BTF-enabled kernel or select --backend bcc.",
-            backend == "core",
-        ),
-        _check_tracepoints(),
-        _check_privileges(),
-        _check_pid_namespace_helper(),
+        _check_platform(),
+        _check_root(),
     ]
-    sidecar = find_sidecar()
-    checks.extend(
-        (
-            _check_sidecar(sidecar, backend),
-            _check_bpf_object(sidecar, backend),
-            _check_bcc(backend),
+    if backend == "core":
+        checks.extend(
+            (
+                _check_path(
+                    "btf",
+                    Path("/sys/kernel/btf/vmlinux"),
+                    "kernel BTF is readable (informational for this tracepoint-only program)",
+                    "Kernel BTF is optional here; attach is authoritative for Core support.",
+                    False,
+                ),
+                _check_tracepoints(),
+                _check_privileges(),
+                _check_pid_namespace_helper(),
+            )
         )
-    )
+        sidecar = find_sidecar()
+        checks.extend(
+            (
+                _check_sidecar(sidecar, backend),
+                _check_bpf_object(sidecar, backend),
+            )
+        )
+    else:
+        checks.extend((_check_tracepoints(), _check_privileges(), _check_bcc()))
+    if not stats_mode:
+        checks.append(_check_austin())
+
     namespace, namespace_check = _check_namespace(target_pid, target_tid)
     checks.append(namespace_check)
     required = {
-        "bcc": {"tracepoints", "privileges", "bcc"},
+        "bcc": {"platform", "root", "tracepoints", "privileges", "bcc"},
         "core": {
-            "btf",
+            "platform",
+            "root",
             "tracepoints",
             "privileges",
             "pid_namespace_helper",
@@ -105,18 +133,62 @@ def collect_diagnostics(
             "bpf_object",
         },
     }[backend]
+    if not stats_mode:
+        required = {*required, "austin"}
     if target_pid is not None:
         required = {*required, "namespace"}
     effective: Backend | None = backend
     if any(check.name in required and check.status != "pass" for check in checks):
         effective = None
-    return DoctorReport(backend, effective, tuple(checks), namespace)
+    return DoctorReport(backend, effective, tuple(checks), namespace, stats_mode)
+
+
+def _check_platform() -> DiagnosticCheck:
+    if sys.platform == "linux":
+        return DiagnosticCheck("platform", "pass", "Linux runtime detected")
+    return DiagnosticCheck(
+        "platform",
+        "fail",
+        f"unsupported platform: {sys.platform}",
+        "Run blocksnoop on a Linux host or use a Linux debug container.",
+    )
+
+
+def _check_root() -> DiagnosticCheck:
+    """Match the current runtime's deliberately strict root policy.
+
+    Core can technically attach with carefully selected Linux capabilities,
+    but Austin and cross-namespace collection need additional capabilities.
+    Until that complete least-privilege profile is supported end-to-end, the
+    CLI's root requirement is the honest, testable contract.
+    """
+    if os.geteuid() == 0:
+        return DiagnosticCheck("root", "pass", "running as root")
+    return DiagnosticCheck(
+        "root",
+        "fail",
+        "blocksnoop currently requires an effective UID of 0",
+        "Run with sudo, or use a privileged debug container.",
+    )
+
+
+def _check_austin() -> DiagnosticCheck:
+    if shutil.which("austin") is not None:
+        return DiagnosticCheck("austin", "pass", "Austin sampler is available")
+    return DiagnosticCheck(
+        "austin",
+        "fail",
+        "Austin sampler was not found in PATH",
+        "Install Austin or use `blocksnoop doctor --stats` for eBPF-only mode.",
+    )
 
 
 def render_diagnostics(report: DoctorReport, *, verbose: bool = False) -> str:
     effective = report.effective_backend or "unavailable"
     lines = [
         "blocksnoop doctor",
+        f"status: {'ready' if report.healthy else 'not_ready'}",
+        f"mode: {'stats' if report.stats_mode else 'capture'}",
         f"backend: requested={report.requested_backend} effective={effective}",
     ]
     for check in report.checks:
@@ -180,7 +252,8 @@ def _check_privileges() -> DiagnosticCheck:
             "privileges",
             "warn",
             "effective BPF capabilities could not be proven",
-            "Verify CAP_SYS_ADMIN, or both CAP_BPF and CAP_PERFMON, before attaching.",
+            "Run as root in a privileged debug container and verify CAP_SYS_ADMIN, "
+            "or both CAP_BPF and CAP_PERFMON, before attaching.",
         )
     has_sys_admin = bool(capabilities & (1 << 21))
     has_bpf_pair = bool(capabilities & (1 << 38)) and bool(capabilities & (1 << 39))
@@ -192,7 +265,8 @@ def _check_privileges() -> DiagnosticCheck:
         "privileges",
         "fail",
         "CAP_SYS_ADMIN or CAP_BPF+CAP_PERFMON is missing",
-        "Run the container with --privileged or grant the required BPF capabilities.",
+        "Run blocksnoop as root in a privileged debug container. Capability-only "
+        "operation is not yet a supported end-to-end profile.",
     )
 
 
@@ -227,9 +301,10 @@ def _check_sidecar(sidecar: str | None, backend: Backend) -> DiagnosticCheck:
         return DiagnosticCheck("sidecar", "pass", f"resolved: {sidecar}")
     return DiagnosticCheck(
         "sidecar",
-        "fail" if backend == "core" else "warn",
-        "blocksnoop-ebpf was not found in PATH",
-        "Install it or set BLOCKSNOOP_EBPF.",
+        "fail" if backend == "core" else "warn",  # Core is the only caller.
+        "blocksnoop-ebpf sidecar was not found",
+        "Install a native Linux blocksnoop wheel, use the official Docker image, "
+        "or set BLOCKSNOOP_EBPF to a compatible sidecar.",
     )
 
 
@@ -263,14 +338,15 @@ def _bpf_object_candidates(sidecar: str | None) -> list[Path]:
     ]
 
 
-def _check_bcc(backend: Backend) -> DiagnosticCheck:
+def _check_bcc() -> DiagnosticCheck:
     if importlib.util.find_spec("bcc") is not None:
-        return DiagnosticCheck("bcc", "pass", "Python bcc module is importable")
+        return DiagnosticCheck("bcc", "pass", "legacy Python bcc module is importable")
     return DiagnosticCheck(
         "bcc",
-        "fail" if backend == "bcc" else "warn",
-        "Python bcc module is not importable",
-        "Install BCC or select --backend core.",
+        "fail",
+        "legacy Python bcc module is not importable",
+        "Install BCC for the explicit `--backend bcc` compatibility path, "
+        "or use the default Core backend.",
     )
 
 

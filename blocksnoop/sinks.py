@@ -30,6 +30,8 @@ def _level_for_duration(
 class Sink(typing.Protocol):
     """Protocol for output sinks."""
 
+    def emit_session_start(self, record: dict) -> None: ...
+
     def emit(self, record: dict) -> None: ...
 
     def emit_summary(self, summary: dict) -> None: ...
@@ -46,6 +48,7 @@ class ConsoleSink:
         *,
         color: bool | None = None,
         error_threshold_ms: float = _DEFAULT_ERROR_THRESHOLD_MS,
+        summary_only: bool = False,
     ) -> None:
         self._stream = stream or sys.stderr
         if color is None:
@@ -53,8 +56,15 @@ class ConsoleSink:
         else:
             self._color = color
         self._error_threshold_ms = error_threshold_ms
+        self._summary_only = summary_only
+
+    def emit_session_start(self, record: dict) -> None:
+        """Session metadata is machine-readable; the console starts with events."""
+        return
 
     def emit(self, record: dict) -> None:
+        if self._summary_only:
+            return
         duration_ms = record["duration_ms"]
         level = _level_for_duration(duration_ms, self._error_threshold_ms)
 
@@ -110,6 +120,12 @@ class ConsoleSink:
         self._stream.write("--- blocksnoop session ---\n")
         self._stream.write(f"Duration: {summary['duration_s']:.1f}s\n")
         self._stream.write(f"Blocking events detected: {summary['event_count']}\n")
+        self._stream.write(
+            f"Total blocked time: {summary.get('total_blocked_ms', 0.0):.1f}ms\n"
+        )
+        self._stream.write(
+            f"Longest blocking event: {summary.get('max_blocked_ms', 0.0):.1f}ms\n"
+        )
         self._stream.write(f"Lost detector events: {summary['lost_event_count']}\n")
         if summary["lost_events_by_source"]:
             losses = ", ".join(
@@ -117,6 +133,16 @@ class ConsoleSink:
                 for source, count in sorted(summary["lost_events_by_source"].items())
             )
             self._stream.write(f"Lost detector events by source: {losses}\n")
+        top_signatures = summary.get("top_signatures", [])
+        if top_signatures:
+            self._stream.write("Top blocking call sites (by total blocked time):\n")
+            for index, signature in enumerate(top_signatures, start=1):
+                self._stream.write(
+                    f"  {index}. {signature['location']} — "
+                    f"{signature['count']} events, "
+                    f"{signature['total_blocked_ms']:.1f}ms total, "
+                    f"{signature['max_blocked_ms']:.1f}ms max\n"
+                )
 
     def close(self) -> None:
         pass
@@ -134,18 +160,23 @@ class JsonStreamSink:
         self._stream = stream or sys.stdout
         self._error_threshold_ms = error_threshold_ms
 
+    def emit_session_start(self, record: dict) -> None:
+        self._write(record)
+
     def emit(self, record: dict) -> None:
-        output = {
-            **record,
-            "level": _level_for_duration(
-                record["duration_ms"], self._error_threshold_ms
-            ),
-        }
-        self._stream.write(json.dumps(output) + "\n")
-        self._stream.flush()
+        output = dict(record)
+        if "duration_ms" in output:
+            output["level"] = _level_for_duration(
+                float(output["duration_ms"]), self._error_threshold_ms
+            )
+        self._write(output)
 
     def emit_summary(self, summary: dict) -> None:
-        pass  # JSON stream mode doesn't emit summary (matches current behavior)
+        self._write(summary)
+
+    def _write(self, record: dict) -> None:
+        self._stream.write(json.dumps(record, sort_keys=True) + "\n")
+        self._stream.flush()
 
     def close(self) -> None:
         pass
@@ -168,58 +199,51 @@ class JsonFileSink:
         self._handler = logging.FileHandler(path)
         self._handler.setFormatter(logging.Formatter("%(message)s"))
 
+    def emit_session_start(self, record: dict) -> None:
+        output = dict(record)
+        output.setdefault("level", "info")
+        output.setdefault("message", "blocksnoop session started")
+        self._write(output)
+
     def emit(self, record: dict) -> None:
-        duration_ms = record["duration_ms"]
-        level = _level_for_duration(duration_ms, self._error_threshold_ms)
-
-        output = {
-            "timestamp": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%fZ"),
-            "level": level,
-            "message": f"Blocking call detected: {duration_ms:.1f}ms on tid={record['tid']}",
-            "service": self._service,
-            "source": "blocksnoop",
-            "duration_ms": duration_ms,
-            "event_number": record["event_number"],
-            "pid": record["pid"],
-            "tid": record["tid"],
-            "python_stacks": record.get("python_stacks"),
-            "dd": {"service": self._service, "env": self._env},
-        }
-
-        log_record = logging.LogRecord(
-            name="blocksnoop",
-            level=logging.WARNING,
-            pathname="",
-            lineno=0,
-            msg=json.dumps(output),
-            args=(),
-            exc_info=None,
-        )
-        self._handler.emit(log_record)
+        output = dict(record)
+        if "duration_ms" in output:
+            duration_ms = float(output["duration_ms"])
+            output["level"] = _level_for_duration(duration_ms, self._error_threshold_ms)
+            output.setdefault(
+                "message",
+                f"Blocking call detected: {duration_ms:.1f}ms on tid={record['tid']}",
+            )
+        self._write(output)
 
     def emit_summary(self, summary: dict) -> None:
+        output = dict(summary)
+        output.setdefault("level", "info")
+        output.setdefault(
+            "message",
+            f"blocksnoop session ended: {summary['event_count']} blocking events "
+            f"in {summary['duration_s']:.1f}s",
+        )
+        self._write(output)
+
+    def _write(self, record: dict) -> None:
         output = {
-            "timestamp": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%fZ"),
-            "level": "info",
-            "message": (
-                f"blocksnoop session ended: {summary['event_count']} blocking events "
-                f"in {summary['duration_s']:.1f}s"
+            **record,
+            "timestamp": record.get(
+                "observed_at",
+                datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%fZ"),
             ),
             "service": self._service,
+            "env": self._env,
             "source": "blocksnoop",
-            "duration_s": summary["duration_s"],
-            "event_count": summary["event_count"],
-            "lost_event_count": summary["lost_event_count"],
-            "lost_events_by_source": summary["lost_events_by_source"],
             "dd": {"service": self._service, "env": self._env},
         }
-
         log_record = logging.LogRecord(
             name="blocksnoop",
             level=logging.INFO,
             pathname="",
             lineno=0,
-            msg=json.dumps(output),
+            msg=json.dumps(output, sort_keys=True),
             args=(),
             exc_info=None,
         )

@@ -9,7 +9,11 @@ from unittest.mock import MagicMock, Mock, patch
 
 import pytest
 
-from blocksnoop.backends import create_detector, validate_backend_available
+from blocksnoop.backends import (
+    BackendUnavailableError,
+    create_detector,
+    validate_backend_available,
+)
 from blocksnoop.core import BlockingEvent, DetectorConfig
 from blocksnoop.core_backend import CoreDetector, CoreDetectorError, find_sidecar
 from blocksnoop.detector import BccDetector, BccDetectorError, EbpfDetector
@@ -109,6 +113,21 @@ def test_bcc_detector_surfaces_poll_failure_and_ignores_it_after_stop() -> None:
     ):
         detector.check_health()
     detector.stop()
+
+
+def test_bcc_detector_normalises_startup_failures() -> None:
+    detector = BccDetector(config=_config(), callback=Mock())
+    with (
+        patch(
+            "blocksnoop.detector._detect_epoll_syscalls",
+            side_effect=RuntimeError("tracefs unavailable"),
+        ),
+        pytest.raises(
+            BccDetectorError,
+            match="BCC failed to compile or attach its probes: tracefs unavailable",
+        ),
+    ):
+        detector.start()
     detector.check_health()
 
 
@@ -153,6 +172,14 @@ def test_validate_core_backend_never_imports_bcc() -> None:
         patch.dict(sys.modules, {"bcc": None}),
     ):
         validate_backend_available("core")
+
+
+def test_explicit_legacy_bcc_does_not_fall_back_to_core() -> None:
+    with (
+        patch.dict(sys.modules, {"bcc": None}),
+        pytest.raises(BackendUnavailableError, match="explicit legacy backend"),
+    ):
+        validate_backend_available("bcc")
 
 
 def test_core_sidecar_environment_override_is_resolved() -> None:

@@ -337,11 +337,11 @@ def test_json_stream_backward_compatible_schema():
 
 
 def test_json_stream_no_summary():
-    """JSON stream mode doesn't emit summary (matches current behavior)."""
+    """JSON stream mode carries the final session summary."""
     buf = StringIO()
     sink = JsonStreamSink(stream=buf)
     sink.emit_summary(_make_summary())
-    assert buf.getvalue() == ""
+    assert json.loads(buf.getvalue())["event_count"] == 3
 
 
 # --- JsonFileSink ---
@@ -406,3 +406,28 @@ def test_json_file_multiple_events():
     assert lines[0]["level"] == "warning"
     assert lines[1]["level"] == "error"
     assert lines[2]["level"] == "info"
+
+
+def test_json_file_preserves_typed_record_and_adds_log_metadata():
+    with tempfile.NamedTemporaryFile(mode="r", suffix=".json", delete=False) as f:
+        path = f.name
+    sink = JsonFileSink(path=path, service="api", env="production")
+    typed = {
+        "schema": "blocksnoop.events/v1",
+        "schema_version": 1,
+        "type": "session_start",
+        "session_id": "session-1",
+        "observed_at": "2026-08-08T12:00:00.000Z",
+    }
+    sink.emit_session_start(typed)
+    sink.close()
+
+    with open(path) as f:
+        record = json.loads(f.readline())
+    for key, value in typed.items():
+        assert record[key] == value
+    assert record["service"] == "api"
+    assert record["env"] == "production"
+    assert record["timestamp"] == typed["observed_at"]
+    assert record["level"] == "info"
+    assert record["message"] == "blocksnoop session started"

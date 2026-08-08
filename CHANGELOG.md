@@ -1,5 +1,32 @@
 # Changelog
 
+## [v0.11.0] - 2026-08-08
+
+### Changed
+
+- Core is now the default eBPF backend on Linux. BCC remains available only
+  through the explicit legacy `--backend bcc` path; backend selection never
+  falls back silently.
+- `blocksnoop doctor` now checks the complete normal-capture pre-flight,
+  including Austin. `blocksnoop doctor --stats` performs the eBPF-only check
+  without requiring Austin. Its JSON report is versioned as
+  `blocksnoop.doctor/v1` and has a `ready` / `not_ready` verdict.
+- The Core tracepoint-only program no longer treats host kernel BTF as a hard
+  prerequisite: it has no kernel-layout relocations, and a real attach remains
+  authoritative. Kernel 5.7+, tracepoints, privileges, and native Core assets
+  remain required.
+- `--json` now emits a versioned `blocksnoop.events/v1` NDJSON lifecycle with
+  `session_start`, `blocking_event`, and `session_summary` records. Summaries
+  include completion status, loss counters, aggregate blocking time, and the
+  top blocking call sites.
+- `--summary-only`, `--fail-on {none,event,error}`, and `--fail-on-loss` make
+  Blocksnoop directly usable in automation while preserving a launched
+  process's exit status.
+- CI and release verification now record the real kernel visible to each
+  privileged amd64/arm64 test and exercise the default backend in same- and
+  cross-PID-namespace scenarios. A separate manual workflow is ready for
+  pinned 5.15 and 6.8 self-hosted runners.
+
 ## [v0.10.1] - 2026-08-08
 
 ### Fixed

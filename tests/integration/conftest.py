@@ -74,9 +74,14 @@ def run_blocksnoop_docker(
     events: list[dict] = []
     for line in raw_lines:
         try:
-            events.append(json.loads(line))
+            record = json.loads(line)
         except (json.JSONDecodeError, ValueError):
             continue  # skip summary lines or partial output on SIGTERM
+        # v1 NDJSON has multiple record types.  Only blocking_event records
+        # have the event fields asserted by integration tests; session start
+        # and summary records are successful protocol output, not detections.
+        if isinstance(record, dict) and record.get("type") == "blocking_event":
+            events.append(record)
 
     return BlocksnoopResult(
         exit_code=proc.returncode,

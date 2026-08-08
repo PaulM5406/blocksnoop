@@ -1,0 +1,85 @@
+name: Kernel matrix
+
+# This workflow is intentionally manual until dedicated runners exist. Docker
+# containers share their runner's kernel, so a hosted ubuntu runner cannot
+# honestly represent 5.15 or 6.8. Provision disposable VM runners with the
+# labels below, booted into the asserted kernel, then dispatch this workflow.
+on:
+  workflow_dispatch:
+
+jobs:
+  default-backend-kernel-contract:
+    name: Default backend (${{ matrix.id }})
+    timeout-minutes: 35
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - id: linux-5.15-x86_64
+            runner: '["self-hosted", "linux", "x64", "blocksnoop-kernel-5-15"]'
+            arch: x86_64
+            kernel_prefix: "5.15"
+          - id: linux-6.8-x86_64
+            runner: '["self-hosted", "linux", "x64", "blocksnoop-kernel-6-8"]'
+            arch: x86_64
+            kernel_prefix: "6.8"
+          - id: linux-6.8-aarch64
+            runner: '["self-hosted", "linux", "arm64", "blocksnoop-kernel-6-8"]'
+            arch: aarch64
+            kernel_prefix: "6.8"
+    runs-on: ${{ fromJSON(matrix.runner) }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+      - run: uv sync --locked --all-extras --dev
+      - run: docker info
+      - run: docker compose build
+      - name: Fail closed unless the VM has its declared kernel capabilities
+        run: |
+          set -euo pipefail
+          docker run --rm --privileged \
+            -v /sys/kernel/debug:/sys/kernel/debug:ro \
+            -v "$GITHUB_WORKSPACE:/workspace:ro" \
+            -v "$GITHUB_WORKSPACE:/output" \
+            blocksnoop-blocksnoop:latest \
+            python /workspace/scripts/kernel_contract.py \
+              --require-arch "${{ matrix.arch }}" \
+              --require-kernel-prefix "${{ matrix.kernel_prefix }}" \
+              --output /output/kernel-contract-${{ matrix.id }}.json
+      - name: Require the Core doctor contract in the privileged image
+        run: |
+          set -euo pipefail
+          docker run --rm --privileged \
+            -v /sys/kernel/debug:/sys/kernel/debug:ro \
+            -v "$GITHUB_WORKSPACE:/output" \
+            blocksnoop-blocksnoop:latest \
+            sh -ec 'blocksnoop doctor --backend core --json > /output/core-doctor-${{ matrix.id }}.json'
+          python - <<'PY'
+          import json
+          from pathlib import Path
+
+          report = json.loads(Path("core-doctor-${{ matrix.id }}.json").read_text())
+          checks = {check["name"]: check for check in report["checks"]}
+          required = {
+              "platform", "root", "tracepoints", "privileges",
+              "pid_namespace_helper", "sidecar", "bpf_object", "austin",
+          }
+          assert report["effective_backend"] == "core", report
+          assert required <= checks.keys(), checks
+          assert all(checks[name]["status"] == "pass" for name in required), checks
+          assert "bcc" not in checks, checks
+          PY
+      - name: Attach, receive a blocking event and sample a Python stack
+        run: |
+          uv run pytest \
+            tests/integration/test_core_backend.py \
+            tests/integration/test_core_only_image.py \
+            tests/integration/test_cross_pid_namespace.py -v
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: kernel-contract-${{ matrix.id }}
+          path: |
+            kernel-contract-${{ matrix.id }}.json
+            core-doctor-${{ matrix.id }}.json
+          if-no-files-found: error

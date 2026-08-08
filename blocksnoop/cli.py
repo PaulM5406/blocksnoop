@@ -42,7 +42,12 @@ def _parse_args(
         doctor_parser.add_argument(
             "--tid", type=int, default=None, help="Thread ID to inspect"
         )
-        doctor_parser.add_argument("--backend", choices=("bcc", "core"), default="bcc")
+        doctor_parser.add_argument("--backend", choices=("bcc", "core"), default="core")
+        doctor_parser.add_argument(
+            "--stats",
+            action="store_true",
+            help="Check eBPF-only prerequisites; Austin is not required",
+        )
         doctor_parser.add_argument("--json", dest="json_mode", action="store_true")
         doctor_parser.add_argument("-v", "--verbose", action="store_true")
         args = doctor_parser.parse_args(arguments[1:])
@@ -79,8 +84,8 @@ def _parse_args(
     parser.add_argument(
         "--backend",
         choices=("bcc", "core"),
-        default="bcc",
-        help="eBPF backend to use (default: bcc)",
+        default="core",
+        help="eBPF backend to use (default: core; bcc is legacy compatibility)",
     )
     parser.add_argument(
         "--json", dest="json_mode", action="store_true", help="JSON lines output"
@@ -105,6 +110,11 @@ def _parse_args(
         "--no-color", action="store_true", help="Disable ANSI colors in terminal output"
     )
     parser.add_argument(
+        "--summary-only",
+        action="store_true",
+        help="Suppress individual blocking events and print only the final summary",
+    )
+    parser.add_argument(
         "-v", "--verbose", action="store_true", help="Enable debug logging to stderr"
     )
     parser.add_argument(
@@ -120,6 +130,17 @@ def _parse_args(
         default=200.0,
         metavar="MS",
         help="Correlation time window padding in ms (default: 200)",
+    )
+    parser.add_argument(
+        "--fail-on",
+        choices=("none", "event", "error"),
+        default="none",
+        help="Exit 3 when the completed session has an event or error (default: none)",
+    )
+    parser.add_argument(
+        "--fail-on-loss",
+        action="store_true",
+        help="Exit 3 when the detector lost one or more events",
     )
 
     args = parser.parse_args(arguments)
@@ -147,7 +168,7 @@ def _resolve_target(args: argparse.Namespace) -> tuple[int | None, list[str]]:
 
 
 def _validate_environment(
-    *, stats_mode: bool = False, backend: Backend = "bcc"
+    *, stats_mode: bool = False, backend: Backend = "core"
 ) -> None:
     """Check runtime prerequisites; exits on failure."""
     if os.geteuid() != 0:
@@ -182,6 +203,7 @@ def _build_sinks(args: argparse.Namespace) -> list[Sink]:
                 sys.stderr,
                 color=not args.no_color,
                 error_threshold_ms=args.error_threshold,
+                summary_only=getattr(args, "summary_only", False),
             )
         )
     if args.log_file:
@@ -206,7 +228,10 @@ def _run_doctor(args: argparse.Namespace) -> None:
             print("error: doctor target must be a PID", file=sys.stderr)
             raise SystemExit(2) from None
     report = collect_diagnostics(
-        args.backend, target_pid=target_pid, target_tid=args.tid
+        args.backend,
+        target_pid=target_pid,
+        target_tid=args.tid,
+        stats_mode=args.stats,
     )
     if args.json_mode:
         print(json.dumps(report.as_dict(), sort_keys=True))
@@ -238,55 +263,81 @@ def _run_loop(
     start: typing.Callable[[], None],
     stop: typing.Callable[[], None],
     check_health: typing.Callable[[], None],
-    on_exit: typing.Callable[[], None],
+    on_exit: typing.Callable[[str], None],
     child_process: subprocess.Popen | None,
-) -> None:
+) -> int | None:
     """Signal/wait loop shared by normal and stats paths."""
     cleaned_up = False
 
-    def _cleanup() -> None:
+    def _cleanup(termination_reason: str) -> None:
         nonlocal cleaned_up
         if cleaned_up:
             return
         cleaned_up = True
         try:
             stop()
-        finally:
+        except BaseException:
             try:
-                on_exit()
+                # A session cannot claim to have completed when teardown did
+                # not. Preserve the original stop exception after emitting a
+                # truthful terminal record and reaping the launched target.
+                on_exit("runtime_error")
+            finally:
+                _stop_child(child_process)
+            raise
+        else:
+            try:
+                on_exit(termination_reason)
             finally:
                 _stop_child(child_process)
 
-    try:
-        start()
-    except Exception:
-        _cleanup()
-        raise
-
     def _shutdown(signum: int, frame: object) -> None:
-        _cleanup()
-        sys.exit(0)
+        _cleanup("signal")
+        raise SystemExit(128 + signum)
 
-    signal.signal(signal.SIGINT, _shutdown)
-    signal.signal(signal.SIGTERM, _shutdown)
-
+    previous_handlers = {
+        signal.SIGINT: signal.getsignal(signal.SIGINT),
+        signal.SIGTERM: signal.getsignal(signal.SIGTERM),
+    }
     try:
-        if child_process is not None:
-            while child_process.poll() is None:
-                check_health()
-                time.sleep(0.1)
-            child_process.wait()
+        # Install handlers before ``start``: startup can attach BPF, launch Austin,
+        # or block in a subprocess, and interruptions in that window still need the
+        # same cleanup, summary, and child reaping guarantees as a running session.
+        signal.signal(signal.SIGINT, _shutdown)
+        signal.signal(signal.SIGTERM, _shutdown)
+
+        try:
+            start()
+            if child_process is not None:
+                while child_process.poll() is None:
+                    check_health()
+                    time.sleep(0.1)
+                child_returncode = child_process.poll()
+                assert child_returncode is not None
+                child_process.wait()
+            else:
+                while True:
+                    check_health()
+                    time.sleep(1)
+        except KeyboardInterrupt:
+            _cleanup("signal")
+            raise SystemExit(130) from None
+        except BaseException:
+            _cleanup("runtime_error")
+            raise
         else:
-            while True:
-                check_health()
-                time.sleep(1)
-    except KeyboardInterrupt:
-        _cleanup()
-    except Exception:
-        _cleanup()
-        raise
-    else:
-        _cleanup()
+            termination_reason = (
+                "clean"
+                if child_process is None or child_returncode == 0
+                else "child_exit"
+            )
+            _cleanup(termination_reason)
+            if child_process is not None:
+                return child_returncode
+    finally:
+        for signum, previous_handler in previous_handlers.items():
+            signal.signal(signum, previous_handler)
+    return None
 
 
 def _stop_child(child_process: subprocess.Popen | None) -> None:
@@ -321,6 +372,8 @@ def main() -> None:
     # Resolve threshold default: 0 for --stats, 100 otherwise
     if args.threshold is None:
         args.threshold = 0.0 if args.stats else 100.0
+    if args.stats and (args.fail_on != "none" or args.fail_on_loss):
+        parser.error("--fail-on and --fail-on-loss are not supported with --stats")
 
     target_pid, command = _resolve_target(args)
 
@@ -342,7 +395,13 @@ def main() -> None:
 
     # Launch mode: spawn subprocess and use its PID
     if command:
-        child_process = subprocess.Popen(command)
+        child_process = subprocess.Popen(
+            command,
+            # ``--json`` promises a parseable NDJSON stdout.  A launched
+            # program's normal output therefore belongs on stderr alongside
+            # its own stderr; users can still redirect the two streams apart.
+            stdout=sys.stderr if args.json_mode else None,
+        )
         pid = child_process.pid
         _logger.debug("Launched child process: pid=%d, cmd=%s", pid, command)
     else:
@@ -351,9 +410,9 @@ def main() -> None:
 
     try:
         if args.stats:
-            _run_stats(args, pid, child_process)
+            child_returncode = _run_stats(args, pid, child_process)
         else:
-            _run_normal(args, pid, child_process)
+            child_returncode, reporter = _run_normal(args, pid, child_process)
     except CoreDetectorError as exc:
         print(f"error: Core backend unavailable: {exc}", file=sys.stderr)
         sys.exit(1)
@@ -361,19 +420,35 @@ def main() -> None:
         print(f"error: BCC backend unavailable: {exc}", file=sys.stderr)
         sys.exit(1)
 
+    if child_returncode not in (None, 0):
+        sys.exit(_normalise_child_returncode(child_returncode))
+    if not args.stats and reporter.policy_failed(
+        args.fail_on, fail_on_loss=args.fail_on_loss
+    ):
+        sys.exit(3)
+
+
+def _normalise_child_returncode(returncode: int) -> int:
+    """Preserve a child exit code and render signal exits conventionally."""
+    return 128 - returncode if returncode < 0 else returncode
+
 
 def _run_stats(
     args: argparse.Namespace,
     pid: int,
     child_process: subprocess.Popen | None,
-) -> None:
+) -> int | None:
     """Stats-only path: eBPF detector + StatsCollector, no Austin."""
     config = DetectorConfig(
         pid=pid,
         threshold_ms=args.threshold,
         tid=args.tid,
     )
-    collector = StatsCollector(pid=pid, json_mode=args.json_mode)
+    collector = StatsCollector(
+        pid=pid,
+        json_mode=args.json_mode,
+        stream=sys.stdout if args.json_mode else sys.stderr,
+    )
     detector = create_detector(
         args.backend,
         config=config,
@@ -396,11 +471,11 @@ def _run_stats(
         detector.stop()
         collector.stop()
 
-    _run_loop(
+    return _run_loop(
         _start,
         _stop,
         detector.check_health,
-        on_exit=lambda: _report_detector_losses(detector, verbose=args.verbose),
+        on_exit=lambda _reason: _report_detector_losses(detector, verbose=args.verbose),
         child_process=child_process,
     )
 
@@ -409,7 +484,7 @@ def _run_normal(
     args: argparse.Namespace,
     pid: int,
     child_process: subprocess.Popen | None,
-) -> None:
+) -> tuple[int | None, Reporter]:
     """Normal path: eBPF + Austin + correlator + reporter."""
     sinks = _build_sinks(args)
     config = DetectorConfig(
@@ -418,7 +493,15 @@ def _run_normal(
         tid=args.tid,
         correlation_padding_ms=args.correlation_padding,
     )
-    reporter = Reporter(sinks=sinks)
+    reporter = Reporter(
+        sinks=sinks,
+        backend=args.backend,
+        threshold_ms=args.threshold,
+        target_pid=pid,
+        target_tid=config.tid,
+        error_threshold_ms=args.error_threshold,
+        summary_only=args.summary_only,
+    )
     sampler = AustinSampler(
         pid=pid, sample_interval_ms=config.sample_interval_ms, tid=config.tid
     )
@@ -447,6 +530,7 @@ def _run_normal(
     start_time = time.monotonic()
 
     def _start() -> None:
+        reporter.start()
         sampler.start()
         detector.start()
 
@@ -454,13 +538,17 @@ def _run_normal(
         detector.stop()
         sampler.stop()
 
-    def _on_exit() -> None:
+    def _on_exit(termination_reason: str) -> None:
         reporter.summary(
-            time.monotonic() - start_time, loss_counts=detector.loss_counts
+            time.monotonic() - start_time,
+            loss_counts=detector.loss_counts,
+            termination_reason=termination_reason,
         )
         reporter.close()
 
-    _run_loop(_start, _stop, detector.check_health, _on_exit, child_process)
+    return _run_loop(
+        _start, _stop, detector.check_health, _on_exit, child_process
+    ), reporter
 
 
 if __name__ == "__main__":

@@ -25,11 +25,13 @@ eBPF (kernel)          Austin (userspace)
 
 ## Requirements
 
-- Linux with eBPF support (kernel 4.15+ for BCC; Core namespace filtering
-  requires kernel 5.7+ and readable kernel BTF)
+- Linux with eBPF support (the default Core backend requires kernel 5.7+ for
+  PID-namespace filtering and a readable epoll syscall tracepoint pair)
 - Root privileges (for eBPF and Austin)
-- [BCC (BPF Compiler Collection)](https://github.com/iovisor/bcc) when using the default `--backend bcc`
-- `blocksnoop-ebpf` sidecar when using `--backend core`
+- Native `linux/amd64` or `linux/arm64` Blocksnoop wheel, or the official
+  Docker image (contains the default Core sidecar)
+- [BCC (BPF Compiler Collection)](https://github.com/iovisor/bcc) only for
+  the explicit legacy `--backend bcc` compatibility path
 - [Austin](https://github.com/P403n1x87/austin)
 - [austin-python](https://github.com/P403n1x87/austin-python) (installed automatically as a dependency)
 - Python 3.12+
@@ -50,15 +52,17 @@ uv sync --all-extras --dev
 
 ### eBPF backends
 
-`--backend bcc` remains the default compatibility path. `--backend core` is an
-experimental compile-once
-backend: Python launches the small `blocksnoop-ebpf` libbpf sidecar and consumes
-its versioned NDJSON event stream. Protocol v2 resolves the target PID namespace
-and its local PID/TID before attaching, so a hostPID collector can monitor a
-process in a private container namespace without broadening its filter. The
-current tracepoint-only program does not
-read kernel structures, so the precompiled object has no kernel-layout
-relocations despite carrying BTF metadata.
+Core is the default backend. Python launches the small `blocksnoop-ebpf`
+libbpf sidecar and consumes its versioned NDJSON event stream. Protocol v2
+resolves the target PID namespace and its local PID/TID before attaching, so a
+hostPID collector can monitor a process in a private container namespace
+without broadening its filter.
+
+The current program attaches only to syscall tracepoints and does not read
+kernel structures. Its object contains BTF metadata, but it has no
+kernel-layout relocations: a readable kernel BTF file is therefore useful
+diagnostic information, not a Core prerequisite. A real Core attach is the
+authoritative compatibility check.
 
 On `linux/amd64` and `linux/arm64`, PyPI selects a native wheel containing the
 sidecar and precompiled object, so `pip install blocksnoop` is sufficient for
@@ -69,23 +73,41 @@ sidecar on Linux with `make -C native` and place `native/blocksnoop-ebpf` on
 `PATH`.
 
 The official Docker image is intentionally **Core-only**: it installs the
-native wheel and Austin, but not BCC or kernel headers. Use `--backend core`
-explicitly in that image. A forced Core backend never silently falls back to
-BCC.
+native wheel and Austin, but not BCC or kernel headers. There is no automatic
+fallback. Use `--backend bcc` only on a legacy host where you provisioned BCC
+yourself.
 
 Before attaching, inspect the exact environment and optional target without
 loading BPF or spawning the sidecar:
 
 ```bash
-blocksnoop doctor --backend core
-blocksnoop doctor --backend core 1234
-blocksnoop doctor --backend core 1234 --json
+blocksnoop doctor
+blocksnoop doctor 1234
+blocksnoop doctor 1234 --json
+blocksnoop doctor --stats 1234  # eBPF-only pre-flight; Austin is not required
 ```
 
 `doctor` exits non-zero when a required check fails and includes remediation in
-both human-readable and machine-readable output. Target-specific output shows
+both human-readable and machine-readable output. Capture mode also checks
+Austin; `doctor --stats` intentionally does not. Target-specific output shows
 the host and namespace-local PID/TID plus whether the collector shares the PID
 namespace.
+
+### Legacy BCC compatibility
+
+BCC is retained for hosts that cannot run the supported Core path, such as
+older kernels. It is never selected automatically and is not installed by
+`pip install blocksnoop` or the official image. After provisioning BCC and
+matching kernel headers yourself, select it explicitly:
+
+```bash
+sudo blocksnoop --backend bcc <PID>
+sudo blocksnoop doctor --backend bcc <PID>
+```
+
+BCC is frozen as a compatibility backend through the pre-1.0 releases and any
+future 1.x series; new features target Core. Its removal would not happen
+before a future major release.
 
 ## Usage
 
@@ -111,8 +133,11 @@ sudo blocksnoop -t 50 -- python app.py
 # Human-readable to stderr (default)
 sudo blocksnoop -- python app.py
 
-# JSON lines to stdout (for piping to jq, etc.)
+# Versioned NDJSON lifecycle to stdout (for piping to jq, etc.)
 sudo blocksnoop --json -- python app.py
+
+# Suppress individual event records; keep the start and final summary
+sudo blocksnoop --json --summary-only -- python app.py
 
 # Structured JSON to file (for Datadog/Fluentd/CloudWatch)
 sudo blocksnoop --log-file /var/log/blocksnoop/events.json --service my-api --env production -- python app.py
@@ -129,12 +154,17 @@ Use `--stats` to run **only the eBPF detector** (no Austin profiler, no stack tr
 # Capture all epoll gaps and display live statistics
 sudo blocksnoop --stats <PID>
 
-# JSON lines output (one record per second)
+# Backward-compatible JSON stats snapshots (one record per second)
 sudo blocksnoop --stats --json <PID>
 
 # Only gaps above 10ms
 sudo blocksnoop --stats -t 10 <PID>
 ```
+
+Unlike normal capture mode, `--stats --json` is a stream of independent,
+backward-compatible statistics snapshots rather than a
+`blocksnoop.events/v1` session lifecycle. Each line contains `pid`,
+`elapsed_s`, `count`, `rate`, and percentile fields once events exist.
 
 Sample output (redrawn in place every second):
 
@@ -175,10 +205,18 @@ Blocking events detected: 2
 Lost detector events: 0
 ```
 
-JSON (`--json`):
+Normal capture JSON (`--json` without `--stats`) is a versioned NDJSON
+lifecycle. Every line is independently
+parseable and shares `schema`, `schema_version`, `type`, and `session_id`.
+The three record types are `session_start`, `blocking_event`, and
+`session_summary`; filter events with `jq 'select(.type == "blocking_event")'`.
+The final summary makes a clean zero-event session distinguishable from a
+truncated stream and includes loss counts plus the top blocking call sites.
 
 ```json
-{"event_number": 1, "timestamp_s": 1.23, "duration_ms": 302.1, "pid": 5678, "tid": 1234, "python_stacks": [[{"function": "blocking_io", "file": "app.py", "line": 7, "source": "time.sleep(0.5)"}, {"function": "main", "file": "app.py", "line": 13, "source": "blocking_io()"}]], "level": "warning"}
+{"schema":"blocksnoop.events/v1","schema_version":1,"type":"session_start","session_id":"...","backend":"core","threshold_ms":100.0,"target_pid":5678,"target_tid":5678}
+{"schema":"blocksnoop.events/v1","schema_version":1,"type":"blocking_event","session_id":"...","event_number":1,"timestamp_s":1.23,"duration_ms":302.1,"pid":5678,"tid":5678,"python_stacks":[[{"function":"blocking_io","file":"app.py","line":7,"source":"time.sleep(0.5)"}]],"level":"warning"}
+{"schema":"blocksnoop.events/v1","schema_version":1,"type":"session_summary","session_id":"...","termination_reason":"clean","status":"completed","duration_s":8.0,"event_count":1,"lost_event_count":0,"total_blocked_ms":302.1,"max_blocked_ms":302.1,"top_signatures":[{"location":"app.py:7 in blocking_io","count":1,"total_blocked_ms":302.1,"max_blocked_ms":302.1}]}
 ```
 
 ### CLI reference
@@ -191,8 +229,9 @@ Options:
   -t, --threshold FLOAT        Blocking threshold in ms (default: 100, or 0 with --stats)
   --stats                      eBPF-only mode: show epoll gap distribution (no Austin/stacks)
   --tid INT                    Thread ID to monitor (default: main thread)
-  --backend {bcc,core}         eBPF backend to use (default: bcc)
+  --backend {core,bcc}         eBPF backend to use (default: core; bcc is legacy)
   --json                       JSON lines output to stdout
+  --summary-only               Suppress individual events; keep the session lifecycle
   --log-file PATH              Write structured JSON to file for log aggregators
   --service NAME               Service name for structured logs (default: blocksnoop)
   --env ENV                    Environment tag for structured logs
@@ -200,6 +239,8 @@ Options:
   -v, --verbose                Enable debug logging to stderr
   --error-threshold MS         Duration in ms above which events are errors (default: 500)
   --correlation-padding MS     Correlation time window padding in ms (default: 200)
+  --fail-on {none,event,error} Exit 3 when a completed session violates the policy
+  --fail-on-loss               Exit 3 when detector events were lost
 ```
 
 ## Docker
@@ -213,17 +254,17 @@ docker pull oloapm/blocksnoop
 # Check that the host kernel can run the Core backend
 docker run --rm --privileged --pid=host \
   -v /sys/kernel/debug:/sys/kernel/debug \
-  oloapm/blocksnoop blocksnoop doctor --backend core --json
+  oloapm/blocksnoop blocksnoop doctor --json
 
 # Attach to a process on the host with the precompiled libbpf backend
 docker run --rm --privileged --pid=host \
   -v /sys/kernel/debug:/sys/kernel/debug \
-  oloapm/blocksnoop blocksnoop --backend core -t 100 <PID>
+  oloapm/blocksnoop blocksnoop -t 100 <PID>
 
 # Launch and monitor a process
 docker run --rm --privileged --pid=host \
   -v /sys/kernel/debug:/sys/kernel/debug \
-  oloapm/blocksnoop blocksnoop --backend core -t 100 -- python app.py
+  oloapm/blocksnoop blocksnoop -t 100 -- python app.py
 ```
 
 For local development:
@@ -238,7 +279,7 @@ services:
 ```
 
 ```bash
-docker compose run --rm blocksnoop blocksnoop --backend core -t 100 -- python app.py
+docker compose run --rm blocksnoop blocksnoop -t 100 -- python app.py
 ```
 
 The image is published for `linux/amd64` and `linux/arm64`. It has no BCC
@@ -297,7 +338,10 @@ blocksnoop -t 50 <PID>
 blocksnoop --json -t 50 <PID>
 ```
 
-blocksnoop automatically detects and symlinks available kernel headers when the running kernel differs from the installed headers package (common in containers).
+The Core image never compiles BPF at runtime and needs neither kernel headers
+nor BCC. If `blocksnoop doctor` fails, fix the reported host-kernel, tracefs,
+privilege, or target-visibility prerequisite instead of adding headers to the
+image.
 
 ### Cross-container attach (different mount namespaces)
 
@@ -336,7 +380,18 @@ spec:
       containers:
         - name: blocksnoop
           image: oloapm/blocksnoop:latest
-          command: ["blocksnoop", "--json", "--log-file", "/var/log/blocksnoop/events.json", "--service", "my-api", "--env", "production", "-t", "100"]
+          # A DaemonSet needs an explicit target-selection policy. Set this
+          # value from your workload controller; blocksnoop monitors one PID.
+          env:
+            - name: TARGET_PID
+              value: "1234"
+          command:
+            - sh
+            - -ec
+            - >-
+              exec blocksnoop --json
+              --log-file /var/log/blocksnoop/events.json
+              --service my-api --env production -t 100 "$TARGET_PID"
           securityContext:
             privileged: true
           volumeMounts:

@@ -1,4 +1,4 @@
-"""Unit tests for blocksnoop.reporter (no root, eBPF, or py-spy required)."""
+"""Unit tests for blocksnoop.reporter (no root, eBPF, or Austin required)."""
 
 import json
 from io import StringIO
@@ -155,3 +155,96 @@ def test_report_includes_source_field():
     record = json.loads(buf.getvalue().strip())
     for frame in record["python_stacks"][0]:
         assert "source" in frame
+
+
+def test_json_session_lifecycle_is_typed_and_complete():
+    """A clean JSON session has one start, events, and one final summary."""
+    buf = StringIO()
+    reporter = Reporter(
+        sinks=[JsonStreamSink(stream=buf)],
+        backend="core",
+        threshold_ms=100.0,
+        target_pid=100,
+        target_tid=42,
+    )
+    reporter.start()
+    reporter.report(_make_event(duration_ns=600_000_000))
+    reporter.summary(2.5, loss_counts={"perf_buffer": 1})
+
+    records = [json.loads(line) for line in buf.getvalue().splitlines()]
+    assert [record["type"] for record in records] == [
+        "session_start",
+        "blocking_event",
+        "session_summary",
+    ]
+    assert {record["schema"] for record in records} == {"blocksnoop.events/v1"}
+    assert {record["schema_version"] for record in records} == {1}
+    assert len({record["session_id"] for record in records}) == 1
+
+    event = records[1]
+    for key in (
+        "event_number",
+        "timestamp_s",
+        "duration_ms",
+        "pid",
+        "tid",
+        "python_stacks",
+        "level",
+    ):
+        assert key in event
+
+    summary = records[2]
+    assert summary["termination_reason"] == "clean"
+    assert summary["status"] == "completed"
+    assert summary["event_count"] == 1
+    assert summary["error_event_count"] == 1
+    assert summary["total_blocked_ms"] == 600.0
+    assert summary["max_blocked_ms"] == 600.0
+    assert summary["lost_event_count"] == 1
+    assert summary["top_signatures"] == [
+        {
+            "fingerprint": summary["top_signatures"][0]["fingerprint"],
+            "location": "app.py:42 in cpu_heavy",
+            "count": 1,
+            "total_blocked_ms": 600.0,
+            "max_blocked_ms": 600.0,
+        }
+    ]
+
+
+def test_summary_only_keeps_machine_lifecycle_but_suppresses_events():
+    buf = StringIO()
+    reporter = Reporter(sinks=[JsonStreamSink(stream=buf)], summary_only=True)
+    reporter.start()
+    reporter.report(_make_event())
+    reporter.summary(1.0)
+
+    records = [json.loads(line) for line in buf.getvalue().splitlines()]
+    assert [record["type"] for record in records] == [
+        "session_start",
+        "session_summary",
+    ]
+    assert records[-1]["event_count"] == 1
+
+
+def test_policy_failure_uses_events_errors_and_losses():
+    reporter = Reporter(error_threshold_ms=500.0)
+    reporter.report(_make_event(duration_ns=200_000_000))
+    reporter.summary(1.0, loss_counts={"perf_buffer": 1})
+    assert reporter.policy_failed("event", fail_on_loss=False)
+    assert not reporter.policy_failed("error", fail_on_loss=False)
+    assert reporter.policy_failed("none", fail_on_loss=True)
+
+
+def test_console_summary_aggregates_repeated_call_sites():
+    buf = StringIO()
+    reporter = Reporter(sinks=[ConsoleSink(stream=buf, color=False)])
+    reporter.report(_make_event(duration_ns=200_000_000))
+    reporter.report(_make_event(duration_ns=300_000_000))
+    reporter.summary(1.0)
+
+    output = buf.getvalue()
+    assert "Total blocked time: 500.0ms" in output
+    assert "Longest blocking event: 300.0ms" in output
+    assert "Top blocking call sites" in output
+    assert "app.py:42 in cpu_heavy — 2 events, 500.0ms total, 300.0ms max" in output

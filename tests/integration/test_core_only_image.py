@@ -46,9 +46,26 @@ def test_core_only_image_embeds_native_assets_without_bcc(
         checks = {check["name"]: check for check in report["checks"]}
         assert checks["sidecar"]["status"] == "pass"
         assert checks["bpf_object"]["status"] == "pass"
-        assert checks["bcc"]["status"] == "warn"
+        # Core diagnostics intentionally do not import or inspect BCC.  The
+        # explicit legacy-backend failure is asserted separately below.
+        assert "bcc" not in checks
         PY
         """
         ),
+    ]
+    docker_client.containers.run(docker_image, command=command, remove=True)
+
+
+def test_explicit_bcc_request_fails_without_falling_back(
+    docker_image, docker_client
+) -> None:
+    """Core-only images must never turn an explicit BCC request into Core."""
+    command = [
+        "sh",
+        "-ec",
+        "blocksnoop --backend bcc --stats -- python -c 'pass' "
+        ">/tmp/bcc-stdout 2>/tmp/bcc-stderr && exit 1; "
+        "grep -F 'BCC is the explicit legacy backend, but its Python module is not installed' /tmp/bcc-stderr; "
+        "! grep -qi 'falling back' /tmp/bcc-stderr",
     ]
     docker_client.containers.run(docker_image, command=command, remove=True)
