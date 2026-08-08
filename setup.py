@@ -7,7 +7,7 @@ import stat
 import sys
 from pathlib import Path
 
-from setuptools import setup
+from setuptools import Distribution, setup
 from setuptools.command.build_py import build_py
 from wheel.bdist_wheel import bdist_wheel
 
@@ -83,9 +83,17 @@ class NativeAssetWheel(bdist_wheel):
         return super().get_tag()
 
 
+class BlocksnoopDistribution(Distribution):
+    """Select platlib only when the optional native assets are enabled."""
+
+    def has_ext_modules(self) -> bool:
+        return _native_wheel_enabled()
+
+
 setup(
     cmdclass={
         "bdist_wheel": NativeAssetWheel,
         "build_py": BuildPyWithNativeAssets,
-    }
+    },
+    distclass=BlocksnoopDistribution,
 )
