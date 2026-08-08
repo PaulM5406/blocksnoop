@@ -9,6 +9,8 @@ struct detector_config {
     __u32 target_tgid;
     __u32 target_tid;
     __u64 threshold_ns;
+    __u64 pidns_dev;
+    __u64 pidns_ino;
 };
 
 struct blocking_event {
@@ -40,14 +42,6 @@ struct {
     __type(value, __u32);
 } events SEC(".maps");
 
-/* Number of event submissions rejected by the perf-event buffer, per CPU. */
-struct {
-    __uint(type, BPF_MAP_TYPE_PERCPU_ARRAY);
-    __uint(max_entries, 1);
-    __type(key, __u32);
-    __type(value, __u64);
-} lost SEC(".maps");
-
 static __always_inline struct detector_config *get_config(void)
 {
     __u32 key = 0;
@@ -57,11 +51,13 @@ static __always_inline struct detector_config *get_config(void)
 
 static __always_inline int is_target(struct detector_config *cfg, __u32 *tid)
 {
-    __u64 pid_tgid = bpf_get_current_pid_tgid();
-    __u32 tgid = pid_tgid >> 32;
+    struct bpf_pidns_info pidns = {};
 
-    *tid = (__u32)pid_tgid;
-    return tgid == cfg->target_tgid && *tid == cfg->target_tid;
+    if (bpf_get_ns_current_pid_tgid(cfg->pidns_dev, cfg->pidns_ino, &pidns,
+                                    sizeof(pidns)) != 0)
+        return 0;
+    *tid = pidns.pid;
+    return pidns.tgid == cfg->target_tgid && *tid == cfg->target_tid;
 }
 
 static __always_inline int on_epoll_exit(void *ctx)
@@ -85,9 +81,6 @@ static __always_inline int on_epoll_enter(void *ctx)
     __u64 *start_ns;
     __u64 now;
     __u32 tid;
-    __u32 key = 0;
-    __u64 *lost_count;
-    long result;
 
     if (!cfg || !is_target(cfg, &tid))
         return 0;
@@ -101,14 +94,9 @@ static __always_inline int on_epoll_enter(void *ctx)
         event.start_ns = *start_ns;
         event.end_ns = now;
         event.pid = cfg->target_tgid;
-        event.tid = tid;
-        result = bpf_perf_event_output(ctx, &events, BPF_F_CURRENT_CPU,
-                                       &event, sizeof(event));
-        if (result) {
-            lost_count = bpf_map_lookup_elem(&lost, &key);
-            if (lost_count)
-                __sync_fetch_and_add(lost_count, 1);
-        }
+        event.tid = cfg->target_tid;
+        bpf_perf_event_output(ctx, &events, BPF_F_CURRENT_CPU, &event,
+                              sizeof(event));
     }
 
     bpf_map_delete_elem(&callback_start, &tid);

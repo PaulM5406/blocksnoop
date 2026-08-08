@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from collections.abc import Mapping
 from typing import Protocol
 
 # Stdlib module prefixes whose frames are noise in stack traces.
@@ -38,6 +39,14 @@ class BlockingEvent:
         return (self.end_ns - self.start_ns) / 1_000_000
 
 
+@dataclass(frozen=True)
+class LostEvent:
+    """A batch of kernel events the detector could not deliver."""
+
+    count: int
+    source: str
+
+
 @dataclass
 class DetectorConfig:
     pid: int
@@ -63,3 +72,7 @@ class Detector(Protocol):
 
     def check_health(self) -> None:
         """Raise when the running backend can no longer deliver events."""
+
+    @property
+    def loss_counts(self) -> Mapping[str, int]:
+        """Number of dropped events, grouped by the backend-reported source."""

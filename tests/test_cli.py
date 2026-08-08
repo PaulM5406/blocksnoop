@@ -1,6 +1,8 @@
 """Unit tests for CLI argument parsing, validation, and sink assembly."""
 
+import io
 import logging
+from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
 import pytest
@@ -9,11 +11,21 @@ from blocksnoop.cli import (
     _build_sinks,
     _parse_args,
     _resolve_target,
+    _run_normal,
     _run_loop,
     _validate_environment,
     main,
 )
 from blocksnoop.core_backend import CoreDetectorError
+from blocksnoop.detector import BccDetectorError
+from blocksnoop.diagnostics import (
+    DiagnosticCheck,
+    DoctorReport,
+    _check_namespace,
+    _check_pid_namespace_helper,
+    _check_privileges,
+    collect_diagnostics,
+)
 from blocksnoop.sinks import ConsoleSink, JsonFileSink, JsonStreamSink
 
 
@@ -105,6 +117,13 @@ def test_parse_args_threshold_and_padding_parsing():
 def test_parse_args_error_threshold_parsing():
     args, _ = _parse_args(["--error-threshold", "123.4", "1"])
     assert args.error_threshold == 123.4
+
+
+def test_parse_doctor_accepts_backend_after_subcommand():
+    args, _ = _parse_args(["doctor", "--backend", "core", "1234"])
+    assert args.doctor is True
+    assert args.backend == "core"
+    assert args.target == "1234"
 
 
 # ---------------------------------------------------------------------------
@@ -237,6 +256,142 @@ def test_validate_missing_bcc_error(capsys):
     assert "https://github.com/iovisor/bcc/blob/master/INSTALL.md" in captured.err
 
 
+def test_doctor_json_is_read_only_and_reports_backend(capsys):
+    report = DoctorReport(
+        requested_backend="core",
+        effective_backend="core",
+        checks=(DiagnosticCheck("btf", "pass", "readable"),),
+    )
+    with (
+        patch("blocksnoop.cli.collect_diagnostics", return_value=report) as doctor,
+        patch("blocksnoop.cli.validate_backend_available") as validate,
+        patch("sys.argv", ["blocksnoop", "doctor", "--backend", "core", "--json"]),
+    ):
+        main()
+    assert '"requested_backend": "core"' in capsys.readouterr().out
+    doctor.assert_called_once_with("core", target_pid=None, target_tid=None)
+    validate.assert_not_called()
+
+
+def test_doctor_namespace_reports_distinct_local_pid_and_tid() -> None:
+    statuses = {
+        "/proc/100/status": "Tgid:\t100\nNSpid:\t100\t7\n",
+        "/proc/101/status": "Tgid:\t100\nNSpid:\t101\t8\n",
+    }
+
+    def fake_open(path: str, *args: object, **kwargs: object) -> io.StringIO:
+        return io.StringIO(statuses[path])
+
+    with (
+        patch("builtins.open", side_effect=fake_open),
+        patch(
+            "blocksnoop.diagnostics.os.stat",
+            side_effect=[
+                SimpleNamespace(st_dev=1, st_ino=2),
+                SimpleNamespace(st_dev=1, st_ino=2),
+                SimpleNamespace(st_dev=3, st_ino=4),
+            ],
+        ),
+    ):
+        namespace, check = _check_namespace(100, 101)
+
+    assert check.status == "pass"
+    assert namespace is not None
+    assert (namespace.local_pid, namespace.local_tid) == (7, 8)
+
+
+def test_doctor_privileges_rejects_root_without_bpf_capabilities() -> None:
+    with patch(
+        "builtins.open", return_value=io.StringIO("CapEff:\t0000000000000000\n")
+    ):
+        check = _check_privileges()
+    assert check.status == "fail"
+
+
+@pytest.mark.parametrize(
+    ("release", "status"),
+    [("5.6.19", "fail"), ("5.7.0", "pass"), ("vendor-kernel", "warn")],
+)
+def test_doctor_pid_namespace_helper_kernel_baseline(release: str, status: str) -> None:
+    with patch(
+        "blocksnoop.diagnostics.os.uname", return_value=SimpleNamespace(release=release)
+    ):
+        check = _check_pid_namespace_helper()
+    assert check.status == status
+
+
+def test_core_doctor_rejects_unproven_required_helper() -> None:
+    passing = DiagnosticCheck("other", "pass", "ok")
+    with (
+        patch("blocksnoop.diagnostics._check_path", return_value=passing),
+        patch("blocksnoop.diagnostics._check_tracepoints", return_value=passing),
+        patch("blocksnoop.diagnostics._check_privileges", return_value=passing),
+        patch("blocksnoop.diagnostics._check_sidecar", return_value=passing),
+        patch("blocksnoop.diagnostics._check_bpf_object", return_value=passing),
+        patch("blocksnoop.diagnostics._check_bcc", return_value=passing),
+        patch(
+            "blocksnoop.diagnostics._check_pid_namespace_helper",
+            return_value=DiagnosticCheck("pid_namespace_helper", "warn", "unknown"),
+        ),
+        patch(
+            "blocksnoop.diagnostics._check_namespace",
+            return_value=(None, passing),
+        ),
+    ):
+        report = collect_diagnostics("core")
+    assert report.effective_backend is None
+
+
+def test_doctor_json_parses_options_after_target(capsys) -> None:
+    report = DoctorReport("core", "core", ())
+    with (
+        patch("blocksnoop.cli.collect_diagnostics", return_value=report) as doctor,
+        patch(
+            "sys.argv", ["blocksnoop", "doctor", "1234", "--backend", "core", "--json"]
+        ),
+    ):
+        main()
+    assert '"effective_backend": "core"' in capsys.readouterr().out
+    doctor.assert_called_once_with("core", target_pid=1234, target_tid=None)
+
+
+def test_normal_summary_receives_detector_losses_without_stderr_warning() -> None:
+    args = SimpleNamespace(
+        backend="core",
+        threshold=100.0,
+        tid=None,
+        correlation_padding=200.0,
+        error_threshold=500.0,
+        json_mode=False,
+        log_file=None,
+        service="blocksnoop",
+        env="",
+        no_color=True,
+        verbose=False,
+    )
+    detector = Mock()
+    detector.loss_counts = {"kernel": 4}
+
+    def run_loop(*args: object, **kwargs: object) -> None:
+        args[3]()  # on_exit, after the detector would have been stopped
+
+    with (
+        patch("blocksnoop.cli.Reporter") as reporter_class,
+        patch("blocksnoop.cli.AustinSampler"),
+        patch("blocksnoop.cli.Correlator"),
+        patch("blocksnoop.cli.create_detector", return_value=detector),
+        patch("blocksnoop.cli._run_loop", side_effect=run_loop),
+        patch("blocksnoop.cli._report_detector_losses") as legacy_warning,
+    ):
+        _run_normal(args, 1234, None)
+
+    reporter_class.return_value.summary.assert_called_once()
+    assert reporter_class.return_value.summary.call_args.kwargs["loss_counts"] == {
+        "kernel": 4
+    }
+    legacy_warning.assert_not_called()
+
+
 # ---------------------------------------------------------------------------
 # _build_sinks
 # ---------------------------------------------------------------------------
@@ -314,6 +469,23 @@ def test_core_runtime_error_is_user_facing_without_traceback(capsys) -> None:
 
     stderr = capsys.readouterr().err
     assert "Core backend unavailable: sidecar crashed" in stderr
+    assert "Traceback" not in stderr
+
+
+def test_bcc_runtime_error_is_user_facing_without_traceback(capsys) -> None:
+    with (
+        patch("blocksnoop.cli._validate_environment"),
+        patch(
+            "blocksnoop.cli._run_normal",
+            side_effect=BccDetectorError("perf buffer stopped"),
+        ),
+        patch("sys.argv", ["blocksnoop", "1234"]),
+        pytest.raises(SystemExit, match="1"),
+    ):
+        main()
+
+    stderr = capsys.readouterr().err
+    assert "BCC backend unavailable: perf buffer stopped" in stderr
     assert "Traceback" not in stderr
 
 

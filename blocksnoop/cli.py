@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import logging
 import os
 import signal
@@ -12,8 +13,9 @@ import time
 import typing
 
 from blocksnoop.backends import Backend, create_detector, validate_backend_available
-from blocksnoop.core import DetectorConfig
+from blocksnoop.core import Detector, DetectorConfig, LostEvent
 from blocksnoop.core_backend import CoreDetectorError
+from blocksnoop.detector import BccDetectorError
 from blocksnoop.correlator import Correlator
 from blocksnoop.profiler import (
     AustinSampler,
@@ -22,6 +24,7 @@ from blocksnoop.profiler import (
 from blocksnoop.reporter import Reporter
 from blocksnoop.sinks import ConsoleSink, JsonFileSink, JsonStreamSink, Sink
 from blocksnoop.stats import StatsCollector
+from blocksnoop.diagnostics import collect_diagnostics, render_diagnostics
 
 _logger = logging.getLogger("blocksnoop.cli")
 
@@ -30,6 +33,22 @@ def _parse_args(
     argv: list[str] | None = None,
 ) -> tuple[argparse.Namespace, argparse.ArgumentParser]:
     """Parse CLI arguments and return (namespace, parser)."""
+    arguments = list(sys.argv[1:] if argv is None else argv)
+    if arguments and arguments[0] == "doctor":
+        doctor_parser = argparse.ArgumentParser(
+            description="Check blocksnoop prerequisites"
+        )
+        doctor_parser.add_argument("target", nargs="?", help="PID to inspect")
+        doctor_parser.add_argument(
+            "--tid", type=int, default=None, help="Thread ID to inspect"
+        )
+        doctor_parser.add_argument("--backend", choices=("bcc", "core"), default="bcc")
+        doctor_parser.add_argument("--json", dest="json_mode", action="store_true")
+        doctor_parser.add_argument("-v", "--verbose", action="store_true")
+        args = doctor_parser.parse_args(arguments[1:])
+        args.doctor = True
+        return args, doctor_parser
+
     parser = argparse.ArgumentParser(
         description="Detect blocking calls in asyncio event loops"
     )
@@ -103,7 +122,9 @@ def _parse_args(
         help="Correlation time window padding in ms (default: 200)",
     )
 
-    return parser.parse_args(argv), parser
+    args = parser.parse_args(arguments)
+    args.doctor = False
+    return args, parser
 
 
 def _resolve_target(args: argparse.Namespace) -> tuple[int | None, list[str]]:
@@ -173,6 +194,44 @@ def _build_sinks(args: argparse.Namespace) -> list[Sink]:
             )
         )
     return sinks
+
+
+def _run_doctor(args: argparse.Namespace) -> None:
+    """Run read-only backend diagnostics and return a stable exit status."""
+    target_pid: int | None = None
+    if args.target is not None:
+        try:
+            target_pid = int(args.target)
+        except ValueError:
+            print("error: doctor target must be a PID", file=sys.stderr)
+            raise SystemExit(2) from None
+    report = collect_diagnostics(
+        args.backend, target_pid=target_pid, target_tid=args.tid
+    )
+    if args.json_mode:
+        print(json.dumps(report.as_dict(), sort_keys=True))
+    else:
+        print(render_diagnostics(report, verbose=args.verbose))
+    if not report.healthy:
+        raise SystemExit(1)
+
+
+def _on_detector_loss(event: LostEvent) -> None:
+    """Expose individual loss batches only in debug logs, never event NDJSON."""
+    _logger.debug("Detector lost %d events (source=%s)", event.count, event.source)
+
+
+def _report_detector_losses(detector: Detector, *, verbose: bool) -> None:
+    """Emit a final stderr-only loss summary without changing event streams."""
+    losses = detector.loss_counts
+    total = sum(losses.values())
+    if total:
+        by_source = ", ".join(
+            f"{source}={count}" for source, count in sorted(losses.items())
+        )
+        print(f"warning: detector lost {total} events ({by_source})", file=sys.stderr)
+    elif verbose:
+        _logger.debug("Detector loss summary: no lost events")
 
 
 def _run_loop(
@@ -255,6 +314,10 @@ def main() -> None:
         format="%(name)s %(levelname)s: %(message)s",
     )
 
+    if args.doctor:
+        _run_doctor(args)
+        return
+
     # Resolve threshold default: 0 for --stats, 100 otherwise
     if args.threshold is None:
         args.threshold = 0.0 if args.stats else 100.0
@@ -294,6 +357,9 @@ def main() -> None:
     except CoreDetectorError as exc:
         print(f"error: Core backend unavailable: {exc}", file=sys.stderr)
         sys.exit(1)
+    except BccDetectorError as exc:
+        print(f"error: BCC backend unavailable: {exc}", file=sys.stderr)
+        sys.exit(1)
 
 
 def _run_stats(
@@ -308,7 +374,12 @@ def _run_stats(
         tid=args.tid,
     )
     collector = StatsCollector(pid=pid, json_mode=args.json_mode)
-    detector = create_detector(args.backend, config=config, callback=collector.on_event)
+    detector = create_detector(
+        args.backend,
+        config=config,
+        callback=collector.on_event,
+        loss_callback=_on_detector_loss,
+    )
 
     _logger.debug(
         "Stats mode: pid=%d, tid=%d, threshold=%.0fms",
@@ -329,7 +400,7 @@ def _run_stats(
         _start,
         _stop,
         detector.check_health,
-        on_exit=lambda: None,
+        on_exit=lambda: _report_detector_losses(detector, verbose=args.verbose),
         child_process=child_process,
     )
 
@@ -357,7 +428,10 @@ def _run_normal(
         correlation_padding_ns=int(config.correlation_padding_ms * 1_000_000),
     )
     detector = create_detector(
-        args.backend, config=config, callback=correlator.on_event
+        args.backend,
+        config=config,
+        callback=correlator.on_event,
+        loss_callback=_on_detector_loss,
     )
 
     _logger.debug(
@@ -381,7 +455,9 @@ def _run_normal(
         sampler.stop()
 
     def _on_exit() -> None:
-        reporter.summary(time.monotonic() - start_time)
+        reporter.summary(
+            time.monotonic() - start_time, loss_counts=detector.loss_counts
+        )
         reporter.close()
 
     _run_loop(_start, _stop, detector.check_health, _on_exit, child_process)

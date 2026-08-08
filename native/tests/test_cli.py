@@ -22,20 +22,37 @@ def main() -> int:
 
     help_result = run(binary, "--help")
     assert help_result.returncode == 0, help_result.stderr
-    assert "--protocol-version 1" in help_result.stdout
+    assert "--protocol-version 2" in help_result.stdout
     assert "--threshold-ns" in help_result.stdout
+    assert "--pidns-dev" in help_result.stdout
 
-    missing_protocol = run(binary, "--pid", "1", "--tid", "1", "--threshold-ns", "0")
+    missing_protocol = run(
+        binary,
+        "--pid",
+        "1",
+        "--tid",
+        "1",
+        "--pidns-dev",
+        "1",
+        "--pidns-ino",
+        "1",
+        "--threshold-ns",
+        "0",
+    )
     assert missing_protocol.returncode == 2
     assert missing_protocol.stdout == ""
 
     wrong_protocol = run(
         binary,
         "--protocol-version",
-        "2",
+        "1",
         "--pid",
         "1",
         "--tid",
+        "1",
+        "--pidns-dev",
+        "1",
+        "--pidns-ino",
         "1",
         "--threshold-ns",
         "0",
@@ -46,10 +63,14 @@ def main() -> int:
     invalid_pid = run(
         binary,
         "--protocol-version",
-        "1",
+        "2",
         "--pid",
         "0",
         "--tid",
+        "1",
+        "--pidns-dev",
+        "1",
+        "--pidns-ino",
         "1",
         "--threshold-ns",
         "0",
@@ -60,16 +81,34 @@ def main() -> int:
     negative_threshold = run(
         binary,
         "--protocol-version",
-        "1",
+        "2",
         "--pid",
         "1",
         "--tid",
+        "1",
+        "--pidns-dev",
+        "1",
+        "--pidns-ino",
         "1",
         "--threshold-ns",
         "-1",
     )
     assert negative_threshold.returncode == 2
     assert negative_threshold.stdout == ""
+
+    missing_namespace = run(
+        binary,
+        "--protocol-version",
+        "2",
+        "--pid",
+        "1",
+        "--tid",
+        "1",
+        "--threshold-ns",
+        "0",
+    )
+    assert missing_namespace.returncode == 2
+    assert missing_namespace.stdout == ""
     return 0
 
 

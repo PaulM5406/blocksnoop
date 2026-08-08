@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 import json
+import os
 import shutil
 import subprocess
 from dataclasses import dataclass, field
+from pathlib import Path
 
 import pytest
 
@@ -26,23 +28,49 @@ def run_blocksnoop_docker(
     extra_args: list[str] | None = None,
 ) -> BlocksnoopResult:
     """Run blocksnoop in Docker against a test fixture, return parsed result."""
-    cmd = [
-        "docker",
-        "compose",
-        "run",
-        "--rm",
-        "blocksnoop",
-        "timeout",
-        "--signal=TERM",
-        str(timeout_s),
-        "blocksnoop",
-        "--json",
-        "-t",
-        str(threshold_ms),
-    ]
+    remote_image = os.environ.get("BLOCKSNOOP_TEST_IMAGE")
+    if remote_image:
+        # The production image excludes tests. Pass the fixture as an argv
+        # value so release smokes exercise the pulled artifact without a
+        # checkout bind mount.
+        cmd = [
+            "docker",
+            "run",
+            "--rm",
+            "--privileged",
+            "--pid=host",
+            "-v",
+            "/sys/kernel/debug:/sys/kernel/debug",
+            remote_image,
+            "timeout",
+            "--signal=TERM",
+            str(timeout_s),
+            "blocksnoop",
+            "--json",
+            "-t",
+            str(threshold_ms),
+        ]
+    else:
+        cmd = [
+            "docker",
+            "compose",
+            "run",
+            "--rm",
+            "blocksnoop",
+            "timeout",
+            "--signal=TERM",
+            str(timeout_s),
+            "blocksnoop",
+            "--json",
+            "-t",
+            str(threshold_ms),
+        ]
     if extra_args:
         cmd.extend(extra_args)
-    cmd.extend(["--", "python", fixture])
+    if remote_image:
+        cmd.extend(["--", "python", "-c", Path(fixture).read_text()])
+    else:
+        cmd.extend(["--", "python", fixture])
 
     proc = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout_s + 30)
 
@@ -66,7 +94,10 @@ def run_blocksnoop_docker(
 @pytest.fixture(scope="session")
 def docker_image():
     """Build the Docker image once per session. Skip if Docker unavailable."""
+    remote_image = os.environ.get("BLOCKSNOOP_TEST_IMAGE")
     if not shutil.which("docker"):
+        if remote_image:
+            pytest.fail("Docker is required to smoke BLOCKSNOOP_TEST_IMAGE")
         pytest.skip("Docker not available")
 
     # Check Docker daemon is running
@@ -76,7 +107,20 @@ def docker_image():
         timeout=10,
     )
     if check.returncode != 0:
+        if remote_image:
+            pytest.fail("Docker daemon is required to smoke BLOCKSNOOP_TEST_IMAGE")
         pytest.skip("Docker daemon not running")
+
+    if remote_image:
+        result = subprocess.run(
+            ["docker", "pull", remote_image],
+            capture_output=True,
+            text=True,
+            timeout=300,
+        )
+        if result.returncode != 0:
+            pytest.fail(f"Could not pull BLOCKSNOOP_TEST_IMAGE: {result.stderr[:500]}")
+        return remote_image
 
     # Build the image — try `docker compose` (v2 plugin) first, fall back to
     # `docker-compose` (standalone binary) so this works on machines where
@@ -91,7 +135,7 @@ def docker_image():
             timeout=300,
         )
         if result.returncode == 0:
-            return True
+            return "blocksnoop-blocksnoop:latest"
         # If it's "unknown command" we fall through to the next compose impl;
         # any other error is a real build failure → skip with diagnostics.
         if "unknown" not in (result.stderr or "").lower():
@@ -107,14 +151,19 @@ def docker_client():
     (e.g. `pid_mode="host"` or custom volume/network setup) which the
     existing subprocess-based `run_blocksnoop_docker` helper doesn't expose.
     """
+    remote_image = os.environ.get("BLOCKSNOOP_TEST_IMAGE")
     try:
         import docker  # type: ignore[import-not-found]
     except ImportError:
+        if remote_image:
+            pytest.fail("Docker SDK is required to smoke BLOCKSNOOP_TEST_IMAGE")
         pytest.skip("docker SDK not installed (add to dev deps)")
 
     try:
         client = docker.from_env()
         client.ping()
     except Exception as exc:  # noqa: BLE001 — any failure means we skip
+        if remote_image:
+            pytest.fail(f"Docker SDK is required to smoke BLOCKSNOOP_TEST_IMAGE: {exc}")
         pytest.skip(f"Docker daemon not reachable via SDK: {exc}")
     return client

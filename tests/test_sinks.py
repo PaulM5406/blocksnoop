@@ -44,7 +44,12 @@ def _make_record(
 
 
 def _make_summary() -> dict:
-    return {"duration_s": 45.2, "event_count": 3}
+    return {
+        "duration_s": 45.2,
+        "event_count": 3,
+        "lost_event_count": 4,
+        "lost_events_by_source": {"kernel": 1, "perf_buffer": 3},
+    }
 
 
 # --- Severity classification ---
@@ -130,6 +135,8 @@ def test_console_summary():
     assert "blocksnoop session" in output
     assert "45.2s" in output
     assert "3" in output
+    assert "Lost detector events: 4" in output
+    assert "kernel=1, perf_buffer=3" in output
 
 
 def test_console_color_warning():
@@ -379,6 +386,8 @@ def test_json_file_summary():
         record = json.loads(f.readline().strip())
     assert record["level"] == "info"
     assert record["event_count"] == 3
+    assert record["lost_event_count"] == 4
+    assert record["lost_events_by_source"] == {"kernel": 1, "perf_buffer": 3}
     assert record["dd"] == {"service": "demo", "env": "test"}
     assert "session ended" in record["message"]
 

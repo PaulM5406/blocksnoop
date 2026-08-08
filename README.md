@@ -25,7 +25,8 @@ eBPF (kernel)          Austin (userspace)
 
 ## Requirements
 
-- Linux with eBPF support (kernel 4.15+)
+- Linux with eBPF support (kernel 4.15+ for BCC; Core namespace filtering
+  requires kernel 5.7+ and readable kernel BTF)
 - Root privileges (for eBPF and Austin)
 - [BCC (BPF Compiler Collection)](https://github.com/iovisor/bcc) when using the default `--backend bcc`
 - `blocksnoop-ebpf` sidecar when using `--backend core`
@@ -49,10 +50,13 @@ uv sync --all-extras --dev
 
 ### eBPF backends
 
-`--backend bcc` remains the default and supports the existing namespace-aware
-deployment paths. `--backend core` is the first experimental compile-once
+`--backend bcc` remains the default compatibility path. `--backend core` is an
+experimental compile-once
 backend: Python launches the small `blocksnoop-ebpf` libbpf sidecar and consumes
-its versioned NDJSON event stream. The current tracepoint-only program does not
+its versioned NDJSON event stream. Protocol v2 resolves the target PID namespace
+and its local PID/TID before attaching, so a hostPID collector can monitor a
+process in a private container namespace without broadening its filter. The
+current tracepoint-only program does not
 read kernel structures, so the precompiled object has no kernel-layout
 relocations despite carrying BTF metadata.
 
@@ -60,8 +64,22 @@ The official Docker image contains the native sidecar. A source checkout or
 unpacked source distribution can build it on Linux with `make -C native` and
 place `native/blocksnoop-ebpf` on `PATH`. The portable PyPI wheel does not yet
 contain a platform-specific sidecar; in that installation the CLI reports the
-missing capability and suggests `--backend bcc`. Core v0.8 targets processes in
-the same PID namespace as blocksnoop and never silently falls back to BCC.
+missing capability and suggests `--backend bcc`. A forced Core backend never
+silently falls back to BCC.
+
+Before attaching, inspect the exact environment and optional target without
+loading BPF or spawning the sidecar:
+
+```bash
+blocksnoop doctor --backend core
+blocksnoop doctor --backend core 1234
+blocksnoop doctor --backend core 1234 --json
+```
+
+`doctor` exits non-zero when a required check fails and includes remediation in
+both human-readable and machine-readable output. Target-specific output shows
+the host and namespace-local PID/TID plus whether the collector shares the PID
+namespace.
 
 ## Usage
 
@@ -148,6 +166,7 @@ Human-readable:
 --- blocksnoop session ---
 Duration: 8.0s
 Blocking events detected: 2
+Lost detector events: 0
 ```
 
 JSON (`--json`):
@@ -160,6 +179,7 @@ JSON (`--json`):
 
 ```
 blocksnoop [OPTIONS] [PID] [-- COMMAND ...]
+blocksnoop doctor [OPTIONS] [PID]
 
 Options:
   -t, --threshold FLOAT        Blocking threshold in ms (default: 100, or 0 with --stats)
@@ -185,10 +205,14 @@ blocksnoop requires kernel access, so Docker containers need `--privileged` and 
 docker pull oloapm/blocksnoop
 
 # Attach to a process on the host
-docker run --rm --privileged --pid=host oloapm/blocksnoop blocksnoop -t 100 <PID>
+docker run --rm --privileged --pid=host \
+  -v /sys/kernel/debug:/sys/kernel/debug \
+  oloapm/blocksnoop blocksnoop -t 100 <PID>
 
 # Use the precompiled libbpf backend explicitly
-docker run --rm --privileged --pid=host oloapm/blocksnoop blocksnoop --backend core -t 100 <PID>
+docker run --rm --privileged --pid=host \
+  -v /sys/kernel/debug:/sys/kernel/debug \
+  oloapm/blocksnoop blocksnoop --backend core -t 100 <PID>
 
 # Launch and monitor a process
 docker run --rm --privileged --pid=host oloapm/blocksnoop blocksnoop -t 100 -- python app.py
@@ -213,7 +237,10 @@ docker compose run --rm blocksnoop blocksnoop -t 100 -- python app.py
 
 blocksnoop uses eBPF which operates at the kernel level, so you run it on the **node**, not inside the application container. The target process just needs to be visible from the host PID namespace.
 
-> **Note:** On kernel 5.7+, blocksnoop automatically translates PID namespaces, so container-local PIDs (e.g. PID 1 inside a pod) are resolved correctly without `hostPID: true`. On older kernels, the target process must be visible from the host PID namespace.
+> **Note:** On kernel 5.7+, both backends translate a host-visible target into
+> its container-local PID/TID. A node-level collector still needs
+> `hostPID: true` to see the target in `/proc`; an ephemeral container sharing the target
+> process namespace can use its local PID directly.
 
 ### Ephemeral debug container (recommended)
 

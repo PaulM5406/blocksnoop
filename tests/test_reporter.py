@@ -79,10 +79,11 @@ def test_summary():
     reporter = Reporter(sinks=[ConsoleSink(stream=buf, color=False)])
     reporter.report(_make_event())
     reporter.report(_make_event())
-    reporter.summary(45.2)
+    reporter.summary(45.2, loss_counts={"kernel": 2, "perf_buffer": 3})
     output = buf.getvalue()
     assert "Duration: 45.2s" in output
     assert "Blocking events detected: 2" in output
+    assert "Lost detector events: 5" in output
 
 
 # --- Event count ---

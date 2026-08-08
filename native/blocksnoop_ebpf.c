@@ -22,7 +22,7 @@
 #include <sys/stat.h>
 #include <unistd.h>
 
-#define BLOCKSNOOP_PROTOCOL_VERSION 1
+#define BLOCKSNOOP_PROTOCOL_VERSION 2
 #define PERF_BUFFER_PAGES 64
 #define EPOLL_VARIANT_COUNT 3
 
@@ -30,6 +30,8 @@ struct detector_config {
     uint32_t target_tgid;
     uint32_t target_tid;
     uint64_t threshold_ns;
+    uint64_t pidns_dev;
+    uint64_t pidns_ino;
 };
 
 struct blocking_event {
@@ -59,15 +61,18 @@ static void on_signal(int signum)
 static void usage(FILE *stream, const char *program)
 {
     fprintf(stream,
-            "Usage: %s --protocol-version 1 --pid PID --tid TID --threshold-ns N "
+            "Usage: %s --protocol-version 2 --pid PID --tid TID --pidns-dev DEV "
+            "--pidns-ino INO --threshold-ns N "
             "[--bpf-object FILE]\n"
             "\n"
-            "CO-RE epoll-gap collector. stdout is NDJSON protocol version 1.\n"
+            "CO-RE epoll-gap collector. stdout is NDJSON protocol version 2.\n"
             "\n"
             "Required:\n"
-            "  --protocol-version 1  Protocol version expected by the parent\n"
-            "  --pid PID             Target process ID in this PID namespace\n"
-            "  --tid TID             Target thread ID in this PID namespace\n"
+            "  --protocol-version 2  Protocol version expected by the parent\n"
+            "  --pid PID             Target process ID in its PID namespace\n"
+            "  --tid TID             Target thread ID in its PID namespace\n"
+            "  --pidns-dev DEV       Target PID namespace st_dev\n"
+            "  --pidns-ino INO       Target PID namespace st_ino\n"
             "  --threshold-ns N      Minimum callback gap in nanoseconds\n"
             "\n"
             "Optional:\n"
@@ -84,16 +89,19 @@ static void emit_fatal(const char *message)
     fflush(stdout);
 }
 
-static void emit_ready(uint32_t pid, uint32_t tid, uint64_t threshold_ns,
+static void emit_ready(const struct detector_config *config,
                        const struct epoll_variant variants[EPOLL_VARIANT_COUNT])
 {
     bool first = true;
     size_t i;
 
     printf("{\"version\":%d,\"type\":\"ready\",\"pid\":%u,"
-           "\"tid\":%u,\"threshold_ns\":%llu,\"tracepoints\":[",
-           BLOCKSNOOP_PROTOCOL_VERSION, pid, tid,
-           (unsigned long long)threshold_ns);
+           "\"tid\":%u,\"pidns_dev\":%llu,\"pidns_ino\":%llu,"
+           "\"threshold_ns\":%llu,\"tracepoints\":[",
+           BLOCKSNOOP_PROTOCOL_VERSION, config->target_tgid, config->target_tid,
+           (unsigned long long)config->pidns_dev,
+           (unsigned long long)config->pidns_ino,
+           (unsigned long long)config->threshold_ns);
     for (i = 0; i < EPOLL_VARIANT_COUNT; i++) {
         if (!variants[i].enabled)
             continue;
@@ -104,21 +112,29 @@ static void emit_ready(uint32_t pid, uint32_t tid, uint64_t threshold_ns,
     fflush(stdout);
 }
 
-static void emit_event(const struct blocking_event *event)
+static void emit_event(const struct blocking_event *event,
+                       const struct detector_config *config)
 {
     printf("{\"version\":%d,\"type\":\"event\",\"start_ns\":%llu,"
-           "\"end_ns\":%llu,\"pid\":%u,\"tid\":%u}\n",
+           "\"end_ns\":%llu,\"pid\":%u,\"tid\":%u,"
+           "\"pidns_dev\":%llu,\"pidns_ino\":%llu}\n",
            BLOCKSNOOP_PROTOCOL_VERSION,
            (unsigned long long)event->start_ns,
-           (unsigned long long)event->end_ns, event->pid, event->tid);
+           (unsigned long long)event->end_ns, event->pid, event->tid,
+           (unsigned long long)config->pidns_dev,
+           (unsigned long long)config->pidns_ino);
     fflush(stdout);
 }
 
-static void emit_lost(uint64_t count, const char *source)
+static void emit_lost(uint64_t count, const char *source,
+                      const struct detector_config *config)
 {
     printf("{\"version\":%d,\"type\":\"lost\",\"count\":%llu,"
-           "\"source\":\"%s\"}\n",
-           BLOCKSNOOP_PROTOCOL_VERSION, (unsigned long long)count, source);
+           "\"source\":\"%s\",\"pidns_dev\":%llu,"
+           "\"pidns_ino\":%llu}\n",
+           BLOCKSNOOP_PROTOCOL_VERSION, (unsigned long long)count, source,
+           (unsigned long long)config->pidns_dev,
+           (unsigned long long)config->pidns_ino);
     fflush(stdout);
 }
 
@@ -226,8 +242,8 @@ static int default_bpf_object(const char *argv0, char *path, size_t path_size)
 static void handle_sample(void *ctx, int cpu, void *data, __u32 size)
 {
     const struct blocking_event *event = data;
+    const struct detector_config *config = ctx;
 
-    (void)ctx;
     (void)cpu;
     /*
      * Some perf/libbpf combinations report trailing record alignment bytes
@@ -240,36 +256,15 @@ static void handle_sample(void *ctx, int cpu, void *data, __u32 size)
                 size, sizeof(*event));
         return;
     }
-    emit_event(event);
+    emit_event(event, config);
 }
 
 static void handle_lost(void *ctx, int cpu, __u64 count)
 {
-    (void)ctx;
+    const struct detector_config *config = ctx;
+
     (void)cpu;
-    emit_lost(count, "perf_buffer");
-}
-
-static uint64_t read_kernel_lost_count(int map_fd)
-{
-    __u32 key = 0;
-    int cpu_count;
-    uint64_t *values;
-    uint64_t total = 0;
-    int i;
-
-    cpu_count = libbpf_num_possible_cpus();
-    if (cpu_count <= 0)
-        return 0;
-    values = calloc((size_t)cpu_count, sizeof(*values));
-    if (!values)
-        return 0;
-    if (bpf_map_lookup_elem(map_fd, &key, values) == 0) {
-        for (i = 0; i < cpu_count; i++)
-            total += values[i];
-    }
-    free(values);
-    return total;
+    emit_lost(count, "perf_buffer", config);
 }
 
 int main(int argc, char **argv)
@@ -278,6 +273,8 @@ int main(int argc, char **argv)
         {"protocol-version", required_argument, NULL, 'V'},
         {"pid", required_argument, NULL, 'p'},
         {"tid", required_argument, NULL, 't'},
+        {"pidns-dev", required_argument, NULL, 'd'},
+        {"pidns-ino", required_argument, NULL, 'i'},
         {"threshold-ns", required_argument, NULL, 'n'},
         {"bpf-object", required_argument, NULL, 'b'},
         {"help", no_argument, NULL, 'h'},
@@ -301,6 +298,8 @@ int main(int argc, char **argv)
     uint32_t protocol_version = 0;
     bool have_pid = false;
     bool have_tid = false;
+    bool have_pidns_dev = false;
+    bool have_pidns_ino = false;
     bool have_threshold = false;
     int option;
     int enabled_count = 0;
@@ -332,6 +331,22 @@ int main(int argc, char **argv)
             }
             have_tid = true;
             break;
+        case 'd':
+            if (parse_u64(optarg, &config.pidns_dev) != 0 ||
+                config.pidns_dev == 0) {
+                fprintf(stderr, "blocksnoop-ebpf: invalid --pidns-dev\n");
+                return 2;
+            }
+            have_pidns_dev = true;
+            break;
+        case 'i':
+            if (parse_u64(optarg, &config.pidns_ino) != 0 ||
+                config.pidns_ino == 0) {
+                fprintf(stderr, "blocksnoop-ebpf: invalid --pidns-ino\n");
+                return 2;
+            }
+            have_pidns_ino = true;
+            break;
         case 'n':
             if (parse_u64(optarg, &config.threshold_ns) != 0) {
                 fprintf(stderr, "blocksnoop-ebpf: invalid --threshold-ns\n");
@@ -352,7 +367,8 @@ int main(int argc, char **argv)
     }
 
     if (optind != argc || protocol_version != BLOCKSNOOP_PROTOCOL_VERSION ||
-        !have_pid || !have_tid || !have_threshold) {
+        !have_pid || !have_tid || !have_pidns_dev || !have_pidns_ino ||
+        !have_threshold) {
         usage(stderr, argv[0]);
         return 2;
     }
@@ -430,7 +446,7 @@ int main(int argc, char **argv)
         goto cleanup;
     }
     perf_buffer = perf_buffer__new(bpf_map__fd(map), PERF_BUFFER_PAGES,
-                                   handle_sample, handle_lost, NULL, NULL);
+                                   handle_sample, handle_lost, &config, NULL);
     if (libbpf_get_error(perf_buffer)) {
         perf_buffer = NULL;
         emit_fatal("could not create perf buffer");
@@ -464,7 +480,7 @@ int main(int argc, char **argv)
 
     signal(SIGINT, on_signal);
     signal(SIGTERM, on_signal);
-    emit_ready(config.target_tgid, config.target_tid, config.threshold_ns, variants);
+    emit_ready(&config, variants);
     while (!stopping) {
         error = perf_buffer__poll(perf_buffer, 250);
         if (error < 0 && error != -EINTR) {
@@ -475,14 +491,6 @@ int main(int argc, char **argv)
     error = 0;
 
 cleanup:
-    if (object) {
-        map = bpf_object__find_map_by_name(object, "lost");
-        if (map) {
-            uint64_t lost_count = read_kernel_lost_count(bpf_map__fd(map));
-            if (lost_count)
-                emit_lost(lost_count, "kernel");
-        }
-    }
     for (i = 0; i < (size_t)link_count; i++)
         bpf_link__destroy(links[i]);
     perf_buffer__free(perf_buffer);

@@ -46,7 +46,12 @@ jobs:
       - run: uv sync --all-extras --dev
       - run: docker info
       - run: docker compose build
-      - run: uv run pytest tests/integration/test_core_backend.py -v
+      - name: Test Core in host and private PID namespaces
+        run: |
+          uv run pytest \
+            tests/integration/test_core_backend.py \
+            tests/integration/test_cross_pid_namespace.py \
+            -v -k core
 
   tests:
     name: "Python ${{ matrix.python-version }}"

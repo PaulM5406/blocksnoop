@@ -42,6 +42,10 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: astral-sh/setup-uv@v5
+      - name: Verify tag matches package version
+        run: |
+          VERSION=$(python -c 'import tomllib; print(tomllib.load(open("pyproject.toml", "rb"))["project"]["version"])')
+          test "${GITHUB_REF_NAME#v}" = "$VERSION"
       - run: uv build
       - uses: actions/upload-artifact@v4
         with:
@@ -65,9 +69,100 @@ jobs:
           packages-dir: dist/
           skip-existing: true
 
+  smoke-pypi:
+    name: Test published PyPI artifacts
+    needs: [publish]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: astral-sh/setup-uv@v5
+      - uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist/
+      - name: Wait for exact version and verify uploaded hashes
+        env:
+          VERSION: ${{ github.ref_name }}
+        run: |
+          VERSION=${VERSION#v}
+          for i in $(seq 1 20); do
+            if VERSION="$VERSION" python - <<'PY'
+          import glob
+          import hashlib
+          import json
+          import os
+          import urllib.error
+          import urllib.request
+
+          version = os.environ["VERSION"]
+          try:
+              with urllib.request.urlopen(
+                  f"https://pypi.org/pypi/blocksnoop/{version}/json", timeout=10
+              ) as response:
+                  metadata = json.load(response)
+          except (urllib.error.HTTPError, urllib.error.URLError, json.JSONDecodeError):
+              raise SystemExit(1)
+
+          remote = {item["filename"]: item["digests"]["sha256"] for item in metadata["urls"]}
+          for path in glob.glob("dist/*"):
+              filename = os.path.basename(path)
+              digest = hashlib.sha256(open(path, "rb").read()).hexdigest()
+              if remote.get(filename) != digest:
+                  raise SystemExit(f"PyPI hash mismatch for {filename}")
+          PY
+            then
+              break
+            fi
+            if [ "$i" = 20 ]; then
+              echo "::error::blocksnoop $VERSION did not propagate to PyPI"
+              exit 1
+            fi
+            sleep 15
+          done
+      - name: Install from PyPI outside the checkout
+        env:
+          VERSION: ${{ github.ref_name }}
+        run: |
+          VERSION=${VERSION#v}
+          uv venv --python 3.12 /tmp/blocksnoop-pypi-smoke
+          uv pip install --refresh --index-url https://pypi.org/simple \
+            --python /tmp/blocksnoop-pypi-smoke/bin/python "blocksnoop==$VERSION"
+          cd /tmp
+          VERSION="$VERSION" /tmp/blocksnoop-pypi-smoke/bin/python - <<'PY'
+          import os
+          from importlib.metadata import version
+          from importlib.resources import files
+
+          expected = os.environ["VERSION"]
+          root = files("blocksnoop")
+          assert version("blocksnoop") == expected
+          assert root.joinpath("bpf/blockdetect.c").is_file()
+          assert root.joinpath("bpf/core_blockdetect.bpf.c").is_file()
+          assert root.joinpath("bpf/core_types.h").is_file()
+          PY
+          /tmp/blocksnoop-pypi-smoke/bin/blocksnoop --help
+          tar -tf "$GITHUB_WORKSPACE"/dist/*.tar.gz | grep -q '/native/blocksnoop_ebpf\.c$'
+      - name: Verify wheel-only Core diagnostics fail cleanly
+        run: |
+          set +e
+          REPORT=$(/tmp/blocksnoop-pypi-smoke/bin/blocksnoop doctor \
+            --backend core --json 2>/tmp/blocksnoop-doctor-stderr)
+          STATUS=$?
+          set -e
+          test "$STATUS" = 1
+          REPORT="$REPORT" python - <<'PY'
+          import json
+          import os
+
+          report = json.loads(os.environ["REPORT"])
+          assert report["effective_backend"] is None
+          sidecar = next(check for check in report["checks"] if check["name"] == "sidecar")
+          assert sidecar["status"] == "fail"
+          PY
+          ! grep -q Traceback /tmp/blocksnoop-doctor-stderr
+
   docker:
     name: Build and push Docker image
-    needs: [ci-check]
+    needs: [smoke-pypi]
     runs-on: ubuntu-latest
     environment: release
     steps:
@@ -100,3 +195,54 @@ jobs:
           labels: ${{ steps.meta.outputs.labels }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
+
+  smoke-docker:
+    name: Test published Docker image
+    needs: [docker]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+      - uses: docker/setup-buildx-action@v3
+      - name: Wait for exact multi-arch image
+        env:
+          VERSION: ${{ github.ref_name }}
+        run: |
+          VERSION=${VERSION#v}
+          IMAGE="oloapm/blocksnoop:$VERSION"
+          for i in $(seq 1 20); do
+            if INSPECT=$(docker buildx imagetools inspect "$IMAGE" 2>/dev/null) \
+              && echo "$INSPECT" | grep -q 'Platform:.*linux/amd64' \
+              && echo "$INSPECT" | grep -q 'Platform:.*linux/arm64'; then
+              break
+            fi
+            if [ "$i" = 20 ]; then
+              echo "::error::$IMAGE did not propagate to Docker Hub"
+              exit 1
+            fi
+            sleep 15
+          done
+          docker pull --platform linux/amd64 "$IMAGE"
+          REVISION=$(docker image inspect "$IMAGE" \
+            --format '{{ index .Config.Labels "org.opencontainers.image.revision" }}')
+          test "$REVISION" = "$GITHUB_SHA"
+          PUBLISHED_IMAGE=$(docker image inspect "$IMAGE" --format '{{ index .RepoDigests 0 }}')
+          echo "Published image: $PUBLISHED_IMAGE"
+          echo "PUBLISHED_IMAGE=$PUBLISHED_IMAGE" >> "$GITHUB_ENV"
+      - name: Smoke native and Python artifacts
+        run: |
+          docker run --rm "$PUBLISHED_IMAGE" sh -c \
+            'blocksnoop --help >/dev/null && blocksnoop-ebpf --help >/dev/null && test -x /usr/local/bin/blocksnoop-ebpf && test -f /usr/local/lib/blocksnoop/core_blockdetect.bpf.o'
+      - name: Detect a real blocking workload with Core
+        run: |
+          set -o pipefail
+          timeout 30 docker run --rm --privileged --pid=host \
+            -v /sys/kernel/debug:/sys/kernel/debug \
+            "$PUBLISHED_IMAGE" blocksnoop --backend core --json -t 100 -- \
+            python -c 'import asyncio,time; exec("async def main():\n for _ in range(4):\n  time.sleep(0.25)\n  await asyncio.sleep(0.05)"); asyncio.run(main())' \
+            | python -c 'import json,sys; events=[item for line in sys.stdin if (item := json.loads(line)) and "duration_ms" in item]; assert events; assert all(item["duration_ms"] >= 100 for item in events); print(f"published Core events: {len(events)}")'
+      - name: Detect across a private PID namespace with Core
+        run: |
+          uv sync --all-extras --dev
+          BLOCKSNOOP_TEST_IMAGE="$PUBLISHED_IMAGE" uv run pytest \
+            tests/integration/test_cross_pid_namespace.py -v -k core
