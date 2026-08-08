@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from typing import Protocol
 
 # Stdlib module prefixes whose frames are noise in stack traces.
 # Used by the correlator (to find the deepest app frame) and console sink
@@ -49,3 +50,16 @@ class DetectorConfig:
         if self.tid is None:
             self.tid = self.pid
         self.sample_interval_ms = self.threshold_ms / 3
+
+
+class Detector(Protocol):
+    """Common lifecycle for blocking-event detector backends."""
+
+    def start(self) -> None:
+        """Start delivering blocking events to the configured callback."""
+
+    def stop(self) -> None:
+        """Stop the backend and release its resources."""
+
+    def check_health(self) -> None:
+        """Raise when the running backend can no longer deliver events."""

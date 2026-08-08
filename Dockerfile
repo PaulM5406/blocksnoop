@@ -1,9 +1,26 @@
+FROM debian:bookworm-slim AS core-builder
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    build-essential clang libbpf-dev libelf-dev pkg-config python3 zlib1g-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /src
+COPY blocksnoop/bpf/ /src/blocksnoop/bpf/
+COPY native/ /src/native/
+RUN make -C native && make -C native test
+
+
 FROM python:3.12-bookworm
 
 # BCC dependencies + Austin
 RUN apt-get update && apt-get install -y \
     bpfcc-tools python3-bpfcc linux-headers-generic curl xz-utils musl \
+    libbpf1 libelf1 zlib1g \
     && rm -rf /var/lib/apt/lists/*
+
+COPY --from=core-builder /src/native/blocksnoop-ebpf /usr/local/bin/blocksnoop-ebpf
+COPY --from=core-builder /src/blocksnoop/bpf/core_blockdetect.bpf.o /usr/local/lib/blocksnoop/core_blockdetect.bpf.o
+ENV BLOCKSNOOP_BPF_OBJECT=/usr/local/lib/blocksnoop/core_blockdetect.bpf.o
 
 # Install Austin binary from GitHub releases
 ARG AUSTIN_VERSION=4.0.0

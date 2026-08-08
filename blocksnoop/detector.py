@@ -11,6 +11,7 @@ import threading
 from pathlib import Path
 
 from collections.abc import Callable
+from typing import Any
 
 from blocksnoop.core import BlockingEvent, DetectorConfig
 
@@ -297,7 +298,7 @@ class _BpfEvent(ctypes.Structure):
     ]
 
 
-class EbpfDetector:
+class BccDetector:
     def __init__(
         self,
         config: DetectorConfig,
@@ -307,6 +308,12 @@ class EbpfDetector:
         self._callback = callback
         self._stop_event = threading.Event()
         self._thread: threading.Thread | None = None
+        self._bpf: Any | None = None
+
+    def start(self) -> None:
+        """Compile, attach and begin polling the BCC program."""
+        if self._thread is not None:
+            return
 
         bpf_source_path = os.path.join(
             os.path.dirname(__file__), "bpf", "blockdetect.c"
@@ -324,11 +331,11 @@ class EbpfDetector:
         # need to substitute the in-target NSpid here, not the host PID, or
         # every event gets filtered out. _resolve_target_ns_tgid() returns
         # the host PID when blocksnoop and target share a PID namespace.
-        target_tgid = _resolve_target_ns_tgid(config.pid)
-        assert config.tid is not None
-        target_tid = _resolve_target_ns_tid(config.tid)
+        target_tgid = _resolve_target_ns_tgid(self._config.pid)
+        assert self._config.tid is not None
+        target_tid = _resolve_target_ns_tid(self._config.tid)
 
-        pidns_info = _get_pidns_info(target_pid=config.pid)
+        pidns_info = _get_pidns_info(target_pid=self._config.pid)
         if pidns_info is not None:
             _logger.debug(
                 "Using PID-namespace-aware filtering (dev=%d, ino=%d)", *pidns_info
@@ -341,7 +348,7 @@ class EbpfDetector:
 
         source = _build_bpf_source(
             raw_source,
-            threshold_ms=config.threshold_ms,
+            threshold_ms=self._config.threshold_ms,
             target_tgid=target_tgid,
             target_tid=target_tid,
             epoll_syscalls=epoll_syscalls,
@@ -350,16 +357,21 @@ class EbpfDetector:
 
         _ensure_kernel_headers()
 
-        from bcc import BPF  # type: ignore[import]
+        try:
+            # BCC is optional for the Core backend, so importing and attaching
+            # it must happen only when this backend is actually started.
+            from bcc import BPF  # type: ignore[import]
 
-        self._bpf = BPF(text=source)
-        self._bpf["events"].open_perf_buffer(self._handle_event)
+            self._bpf = BPF(text=source)
+            self._bpf["events"].open_perf_buffer(self._handle_event)
+            self._stop_event.clear()
+            self._thread = threading.Thread(target=self._poll_loop, daemon=True)
+            self._thread.start()
+        except Exception:
+            self._bpf = None
+            self._thread = None
+            raise
         _logger.debug("BPF program loaded, perf buffer open")
-
-    def start(self) -> None:
-        self._stop_event.clear()
-        self._thread = threading.Thread(target=self._poll_loop, daemon=True)
-        self._thread.start()
         _logger.debug("eBPF polling thread started (pid=%d)", self._config.pid)
 
     def stop(self) -> None:
@@ -367,9 +379,14 @@ class EbpfDetector:
         if self._thread is not None:
             self._thread.join()
             self._thread = None
+        self._bpf = None
         _logger.debug("eBPF polling thread stopped")
 
+    def check_health(self) -> None:
+        """BCC polling errors surface through its thread; no extra probe needed."""
+
     def _poll_loop(self) -> None:
+        assert self._bpf is not None
         while not self._stop_event.is_set():
             self._bpf.perf_buffer_poll(timeout=100)
 
@@ -388,3 +405,8 @@ class EbpfDetector:
             blocking_event.duration_ms,
         )
         self._callback(blocking_event)
+
+
+# Compatibility alias for integrations that imported the old backend-specific
+# name before the detector factory was introduced.
+EbpfDetector = BccDetector

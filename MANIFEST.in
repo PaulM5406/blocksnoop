@@ -1,1 +1,4 @@
 include blocksnoop/bpf/blockdetect.c
+include blocksnoop/bpf/core_blockdetect.bpf.c
+include blocksnoop/bpf/core_types.h
+recursive-include native *.c *.py Makefile README.md

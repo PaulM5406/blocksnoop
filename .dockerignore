@@ -14,9 +14,11 @@ build
 .coverage
 htmlcov
 .DS_Store
-tests
+/tests
 examples
 CHANGELOG.md
 CLAUDE.md
 .gitignore
 .mise.toml
+blocksnoop/bpf/*.bpf.o
+native/blocksnoop-ebpf
