@@ -174,7 +174,7 @@ jobs:
           native=("$GITHUB_WORKSPACE"/dist/*manylinux_2_28_x86_64.whl)
           test "${#native[@]}" = 1
           uv venv --python 3.12 /tmp/blocksnoop-wheel-test
-          uv pip install --no-deps --python /tmp/blocksnoop-wheel-test/bin/python "${native[0]}"
+          uv pip install --python /tmp/blocksnoop-wheel-test/bin/python "${native[0]}"
           cd /tmp
           /tmp/blocksnoop-wheel-test/bin/python -c 'from importlib.resources import files; root = files("blocksnoop"); assert root.joinpath("bpf/blockdetect.c").is_file(); assert root.joinpath("bpf/core_blockdetect.bpf.c").is_file(); assert root.joinpath("bpf/core_types.h").is_file()'
           /tmp/blocksnoop-wheel-test/bin/python "$GITHUB_WORKSPACE"/scripts/verify_native_wheel.py --installed --arch x86_64
