@@ -139,7 +139,7 @@ TRACEPOINT_PROBE(syscalls, sys_exit___EPOLL_SYSCALL__) {
     u32 tid = (u32)pid_tgid;
 #endif
 
-    if (tgid != __TARGET_TGID__)
+    if (tgid != __TARGET_TGID__ || tid != __TARGET_TID__)
         return 0;
 
     u64 ts = bpf_ktime_get_ns();
@@ -161,7 +161,7 @@ TRACEPOINT_PROBE(syscalls, sys_enter___EPOLL_SYSCALL__) {
     u32 tid = (u32)pid_tgid;
 #endif
 
-    if (tgid != __TARGET_TGID__)
+    if (tgid != __TARGET_TGID__ || tid != __TARGET_TID__)
         return 0;
 
     u64 *tsp = callback_start.lookup(&tid);
@@ -191,13 +191,14 @@ def _build_bpf_source(
     *,
     threshold_ms: float,
     target_tgid: int,
+    target_tid: int,
     epoll_syscalls: list[str],
     pidns_info: tuple[int, int] | None,
 ) -> str:
     """Assemble the final BCC program from blockdetect.c.
 
     Generates one probe pair per epoll variant, then fills the threshold,
-    target tgid and (optional) PID-namespace placeholders. When *pidns_info*
+    target tgid/tid and (optional) PID-namespace placeholders. When *pidns_info*
     is given, ``__USE_NS_PID__`` is defined so the probes use
     ``bpf_get_ns_current_pid_tgid`` and compare against the target's
     namespace-local tgid.
@@ -210,6 +211,7 @@ def _build_bpf_source(
     source = raw_source.replace("__EPOLL_PROBES__", probes)
     source = source.replace("__THRESHOLD_NS__", str(threshold_ns))
     source = source.replace("__TARGET_TGID__", str(target_tgid))
+    source = source.replace("__TARGET_TID__", str(target_tid))
     if pidns_info is not None:
         dev, ino = pidns_info
         source = "#define __USE_NS_PID__\n" + source
@@ -242,6 +244,17 @@ def _resolve_target_ns_tgid(host_pid: int) -> int:
     except OSError:
         pass
     return host_pid
+
+
+def _resolve_target_ns_tid(host_tid: int) -> int:
+    """Return a thread ID as seen from the target's deepest PID namespace.
+
+    ``NSpid`` is available for individual tasks under ``/proc/<tid>/status``
+    too. The eBPF program observes a namespace-local TID, so filtering an
+    explicit ``--tid`` with the host TID would otherwise drop every event
+    when the target is in a nested PID namespace.
+    """
+    return _resolve_target_ns_tgid(host_tid)
 
 
 def _get_pidns_info(target_pid: int | None = None) -> tuple[int, int] | None:
@@ -312,6 +325,8 @@ class EbpfDetector:
         # every event gets filtered out. _resolve_target_ns_tgid() returns
         # the host PID when blocksnoop and target share a PID namespace.
         target_tgid = _resolve_target_ns_tgid(config.pid)
+        assert config.tid is not None
+        target_tid = _resolve_target_ns_tid(config.tid)
 
         pidns_info = _get_pidns_info(target_pid=config.pid)
         if pidns_info is not None:
@@ -328,6 +343,7 @@ class EbpfDetector:
             raw_source,
             threshold_ms=config.threshold_ms,
             target_tgid=target_tgid,
+            target_tid=target_tid,
             epoll_syscalls=epoll_syscalls,
             pidns_info=pidns_info,
         )

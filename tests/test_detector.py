@@ -278,6 +278,15 @@ def test_resolve_target_ns_tgid_oserror_falls_back_to_host_pid() -> None:
         assert _resolve_target_ns_tgid(9999) == 9999
 
 
+def test_resolve_target_ns_tid_picks_innermost() -> None:
+    """An explicit host TID must become the value BPF sees in the PID ns."""
+    from blocksnoop.detector import _resolve_target_ns_tid
+
+    status = "Name:\tpython\nNSpid:\t833976\t42\n"
+    with patch("builtins.open", new=lambda *a, **k: _StringIO(status)):
+        assert _resolve_target_ns_tid(833976) == 42
+
+
 # ---------------------------------------------------------------------------
 # _detect_epoll_syscalls
 # ---------------------------------------------------------------------------
@@ -335,6 +344,7 @@ def test_build_bpf_source_emits_a_probe_pair_per_variant() -> None:
         _RAW_SOURCE,
         threshold_ms=100,
         target_tgid=1,
+        target_tid=1,
         epoll_syscalls=["epoll_wait", "epoll_pwait", "epoll_pwait2"],
         pidns_info=None,
     )
@@ -346,6 +356,7 @@ def test_build_bpf_source_emits_a_probe_pair_per_variant() -> None:
     assert "__EPOLL_SYSCALL__" not in source
     assert "__THRESHOLD_NS__" not in source
     assert "__TARGET_TGID__" not in source
+    assert "__TARGET_TID__" not in source
 
 
 def test_build_bpf_source_substitutes_threshold_and_tgid() -> None:
@@ -354,11 +365,13 @@ def test_build_bpf_source_substitutes_threshold_and_tgid() -> None:
         _RAW_SOURCE,
         threshold_ms=250,
         target_tgid=4242,
+        target_tid=4243,
         epoll_syscalls=["epoll_wait"],
         pidns_info=None,
     )
     assert "250000000" in source  # 250ms → ns
     assert "4242" in source
+    assert "4243" in source
 
 
 def test_build_bpf_source_without_pidns_uses_host_pid_path() -> None:
@@ -367,11 +380,13 @@ def test_build_bpf_source_without_pidns_uses_host_pid_path() -> None:
         _RAW_SOURCE,
         threshold_ms=100,
         target_tgid=1,
+        target_tid=2,
         epoll_syscalls=["epoll_wait"],
         pidns_info=None,
     )
     assert "#define __USE_NS_PID__" not in source
     assert "bpf_get_current_pid_tgid()" in source
+    assert "tid != 2" in source
 
 
 def test_build_bpf_source_with_pidns_enables_ns_filtering() -> None:
@@ -380,6 +395,7 @@ def test_build_bpf_source_with_pidns_enables_ns_filtering() -> None:
         _RAW_SOURCE,
         threshold_ms=100,
         target_tgid=1,
+        target_tid=2,
         epoll_syscalls=["epoll_pwait"],
         pidns_info=(7, 4026532001),
     )
@@ -387,3 +403,4 @@ def test_build_bpf_source_with_pidns_enables_ns_filtering() -> None:
     assert "bpf_get_ns_current_pid_tgid(7, 4026532001" in source
     assert "__PIDNS_DEV__" not in source
     assert "__PIDNS_INO__" not in source
+    assert "tid != 2" in source

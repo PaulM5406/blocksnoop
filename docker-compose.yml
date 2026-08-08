@@ -1,5 +1,8 @@
 services:
   blocksnoop:
+    # Keep the image tag stable when Compose is run from a worktree, whose
+    # directory name would otherwise become the Compose project name.
+    image: blocksnoop-blocksnoop:latest
     build: .
     privileged: true
     pid: host
