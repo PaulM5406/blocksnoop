@@ -73,6 +73,8 @@ jobs:
     name: Test published PyPI artifacts
     needs: [publish]
     runs-on: ubuntu-latest
+    env:
+      VENV: /tmp/blocksnoop-pypi-smoke
     steps:
       - uses: astral-sh/setup-uv@v5
       - uses: actions/download-artifact@v4
@@ -85,7 +87,8 @@ jobs:
         run: |
           VERSION=${VERSION#v}
           for i in $(seq 1 20); do
-            if VERSION="$VERSION" python - <<'PY'
+            set +e
+            VERSION="$VERSION" python - <<'PY'
           import glob
           import hashlib
           import json
@@ -99,23 +102,47 @@ jobs:
                   f"https://pypi.org/pypi/blocksnoop/{version}/json", timeout=10
               ) as response:
                   metadata = json.load(response)
-          except (urllib.error.HTTPError, urllib.error.URLError, json.JSONDecodeError):
-              raise SystemExit(1)
+          except urllib.error.HTTPError as error:
+              if error.code == 404 or error.code == 408 or error.code == 429 or error.code >= 500:
+                  raise SystemExit(75)
+              raise SystemExit(f"PyPI JSON API returned HTTP {error.code}: {error.reason}")
+          except (urllib.error.URLError, TimeoutError, json.JSONDecodeError):
+              raise SystemExit(75)
 
-          remote = {item["filename"]: item["digests"]["sha256"] for item in metadata["urls"]}
+          remote = {
+              item["filename"]: item["digests"]["sha256"] for item in metadata["urls"]
+          }
+          local = {}
           for path in glob.glob("dist/*"):
               filename = os.path.basename(path)
-              digest = hashlib.sha256(open(path, "rb").read()).hexdigest()
-              if remote.get(filename) != digest:
-                  raise SystemExit(f"PyPI hash mismatch for {filename}")
+              local[filename] = hashlib.sha256(open(path, "rb").read()).hexdigest()
+
+          if local.keys() != remote.keys():
+              raise SystemExit(
+                  "PyPI artifact filenames differ: "
+                  f"local={sorted(local)} remote={sorted(remote)}"
+              )
+          for filename, digest in local.items():
+              if remote[filename] != digest:
+                  raise SystemExit(
+                      f"PyPI hash mismatch for {filename}: "
+                      f"local={digest} remote={remote[filename]}"
+                  )
           PY
-            then
+            STATUS=$?
+            set -e
+            if [ "$STATUS" = 0 ]; then
               break
             fi
+            if [ "$STATUS" != 75 ]; then
+              echo "::error::PyPI artifacts for $VERSION do not match local dist"
+              exit "$STATUS"
+            fi
             if [ "$i" = 20 ]; then
-              echo "::error::blocksnoop $VERSION did not propagate to PyPI"
+              echo "::error::blocksnoop $VERSION did not propagate to the PyPI JSON API"
               exit 1
             fi
+            echo "Attempt $i/20: PyPI JSON API is not ready, waiting 15s..."
             sleep 15
           done
       - name: Install from PyPI outside the checkout
@@ -123,11 +150,23 @@ jobs:
           VERSION: ${{ github.ref_name }}
         run: |
           VERSION=${VERSION#v}
-          uv venv --python 3.12 /tmp/blocksnoop-pypi-smoke
-          uv pip install --refresh --index-url https://pypi.org/simple \
-            --python /tmp/blocksnoop-pypi-smoke/bin/python "blocksnoop==$VERSION"
+          uv venv --clear --python 3.12 "$VENV"
+          for i in $(seq 1 20); do
+            if uv pip install --no-cache --index-url https://pypi.org/simple \
+              --python "$VENV/bin/python" "blocksnoop==$VERSION"; then
+              break
+            fi
+            if [ "$i" = 20 ]; then
+              echo "::error::blocksnoop $VERSION is not installable from the PyPI Simple Index"
+              exit 1
+            fi
+            echo "Attempt $i/20: blocksnoop $VERSION is not installable from the"
+            echo "Simple Index yet; waiting 15s..."
+            sleep 15
+          done
           cd /tmp
-          VERSION="$VERSION" /tmp/blocksnoop-pypi-smoke/bin/python - <<'PY'
+          VERSION="$VERSION" \
+            "$VENV/bin/python" - <<'PY'
           import os
           from importlib.metadata import version
           from importlib.resources import files
@@ -139,25 +178,48 @@ jobs:
           assert root.joinpath("bpf/core_blockdetect.bpf.c").is_file()
           assert root.joinpath("bpf/core_types.h").is_file()
           PY
-          /tmp/blocksnoop-pypi-smoke/bin/blocksnoop --help
-          tar -tf "$GITHUB_WORKSPACE"/dist/*.tar.gz | grep -q '/native/blocksnoop_ebpf\.c$'
+          "$VENV/bin/blocksnoop" --help
+          "$VENV/bin/python" - <<'PY'
+          import glob
+          import os
+          import tarfile
+
+          archives = glob.glob(
+              os.path.join(os.environ["GITHUB_WORKSPACE"], "dist", "*.tar.gz")
+          )
+          assert len(archives) == 1, (
+              f"expected one source distribution, found: {archives}"
+          )
+          with tarfile.open(archives[0]) as archive:
+              assert any(
+                  member.isfile()
+                  and member.name.endswith("/native/blocksnoop_ebpf.c")
+                  for member in archive.getmembers()
+              ), "source distribution is missing native/blocksnoop_ebpf.c"
+          PY
       - name: Verify wheel-only Core diagnostics fail cleanly
         run: |
           set +e
-          REPORT=$(/tmp/blocksnoop-pypi-smoke/bin/blocksnoop doctor \
-            --backend core --json 2>/tmp/blocksnoop-doctor-stderr)
+          "$VENV/bin/blocksnoop" doctor \
+            --backend core --json >/tmp/blocksnoop-doctor-report.json \
+            2>/tmp/blocksnoop-doctor-stderr
           STATUS=$?
           set -e
           test "$STATUS" = 1
-          REPORT="$REPORT" python - <<'PY'
+          if ! "$VENV/bin/python" - <<'PY'
           import json
-          import os
+          from pathlib import Path
 
-          report = json.loads(os.environ["REPORT"])
+          report = json.loads(Path("/tmp/blocksnoop-doctor-report.json").read_text())
           assert report["effective_backend"] is None
           sidecar = next(check for check in report["checks"] if check["name"] == "sidecar")
           assert sidecar["status"] == "fail"
           PY
+          then
+            echo "::error::blocksnoop doctor did not emit a valid JSON report" >&2
+            cat /tmp/blocksnoop-doctor-stderr >&2
+            exit 1
+          fi
           ! grep -q Traceback /tmp/blocksnoop-doctor-stderr
 
   docker:
