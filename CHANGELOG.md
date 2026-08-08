@@ -1,5 +1,11 @@
 # Changelog
 
+## [v0.9.2] - 2026-08-08
+
+### Fixed
+
+- `blocksnoop doctor` now reports inaccessible tracefs/debugfs and BPF-object paths as actionable diagnostics instead of raising permission errors. It still finds usable tracepoints from another readable mount.
+
 ## [v0.9.1] - 2026-08-08
 
 ### Fixed

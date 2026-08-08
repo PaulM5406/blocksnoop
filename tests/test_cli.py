@@ -1,7 +1,9 @@
 """Unit tests for CLI argument parsing, validation, and sink assembly."""
 
+import errno
 import io
 import logging
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
@@ -24,6 +26,7 @@ from blocksnoop.diagnostics import (
     _check_namespace,
     _check_pid_namespace_helper,
     _check_privileges,
+    _check_tracepoints,
     collect_diagnostics,
 )
 from blocksnoop.sinks import ConsoleSink, JsonFileSink, JsonStreamSink
@@ -306,6 +309,74 @@ def test_doctor_privileges_rejects_root_without_bpf_capabilities() -> None:
     ):
         check = _check_privileges()
     assert check.status == "fail"
+
+
+def test_doctor_tracepoints_reports_permission_error() -> None:
+    with patch(
+        "pathlib.Path.is_file", side_effect=PermissionError(errno.EACCES, "denied")
+    ):
+        check = _check_tracepoints()
+
+    assert check.status == "fail"
+    assert "no readable" in check.detail
+    assert check.remediation is not None
+    assert "grant read access" in check.remediation
+
+
+def test_doctor_tracepoints_uses_readable_root_after_permission_error() -> None:
+    inaccessible = Path("/tracefs-inaccessible/events/syscalls")
+    readable = Path("/tracefs-readable/events/syscalls")
+    expected = {
+        readable / "sys_enter_epoll_wait" / "format",
+        readable / "sys_exit_epoll_wait" / "format",
+    }
+
+    def is_file(path: Path) -> bool:
+        if str(path).startswith(str(inaccessible)):
+            raise PermissionError(errno.EACCES, "denied")
+        return path in expected
+
+    with (
+        patch("blocksnoop.diagnostics._TRACEFS_ROOTS", (inaccessible, readable)),
+        patch("pathlib.Path.is_file", autospec=True, side_effect=is_file),
+        patch("blocksnoop.diagnostics.os.access", return_value=True),
+    ):
+        check = _check_tracepoints()
+
+    assert check.status == "pass"
+    assert check.detail == "epoll pairs available: epoll_wait"
+
+
+def test_doctor_tracepoints_uses_first_root_with_pairs() -> None:
+    first = Path("/tracefs-first/events/syscalls")
+    second = Path("/tracefs-second/events/syscalls")
+    expected = {
+        first / "sys_enter_epoll_wait" / "format",
+        first / "sys_exit_epoll_wait" / "format",
+        second / "sys_enter_epoll_pwait" / "format",
+        second / "sys_exit_epoll_pwait" / "format",
+    }
+
+    with (
+        patch("blocksnoop.diagnostics._TRACEFS_ROOTS", (first, second)),
+        patch(
+            "pathlib.Path.is_file",
+            autospec=True,
+            side_effect=lambda path: path in expected,
+        ),
+        patch("blocksnoop.diagnostics.os.access", return_value=True),
+    ):
+        check = _check_tracepoints()
+
+    assert check.detail == "epoll pairs available: epoll_wait"
+
+
+def test_doctor_tracepoints_reraises_unexpected_io_error() -> None:
+    with (
+        patch("pathlib.Path.is_file", side_effect=OSError(errno.EIO, "I/O error")),
+        pytest.raises(OSError, match="I/O error"),
+    ):
+        _check_tracepoints()
 
 
 @pytest.mark.parametrize(
