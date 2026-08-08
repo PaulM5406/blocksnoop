@@ -1,5 +1,11 @@
 # Changelog
 
+## [v0.10.1] - 2026-08-08
+
+### Fixed
+
+- Install the release image smoke-test dependencies before running the published-image checks.
+
 ## [v0.10.0] - 2026-08-08
 
 ### Added
