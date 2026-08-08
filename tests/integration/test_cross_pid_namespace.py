@@ -49,10 +49,7 @@ BLOCKSNOOP_TIMEOUT_S = 10
 SETTLE_DELAY_S = 2
 
 
-@pytest.mark.parametrize("backend", ["bcc", "core"])
-def test_blocksnoop_attaches_across_pid_namespaces(
-    docker_image, docker_client, backend: str
-):
+def test_default_backend_attaches_across_pid_namespaces(docker_image, docker_client):
     """blocksnoop in host PID ns + target in private PID ns → Austin samples.
 
     Regression test for two bugs that broke this exact topology:
@@ -99,8 +96,6 @@ def test_blocksnoop_attaches_across_pid_namespaces(
                 "timeout",
                 str(BLOCKSNOOP_TIMEOUT_S),
                 "blocksnoop",
-                "--backend",
-                backend,
                 "-t",
                 str(THRESHOLD_MS),
                 "--json",
@@ -159,13 +154,19 @@ def test_blocksnoop_attaches_across_pid_namespaces(
             ev = json.loads(line)
         except json.JSONDecodeError:
             continue
-        if isinstance(ev, dict) and "python_stacks" in ev:
+        if (
+            isinstance(ev, dict)
+            and ev.get("type") == "blocking_event"
+            and "python_stacks" in ev
+        ):
             events.append(ev)
 
     assert events, f"no Austin samples with python_stacks emitted; raw output:\n{text}"
     assert all(event["duration_ms"] >= THRESHOLD_MS for event in events)
 
-    if backend == "core":
-        assert all(event["pid"] == target_ns_pid for event in events), text
-        assert all(event["tid"] == target_ns_pid for event in events), text
-        assert all(event["pid"] != host_pid for event in events), text
+    # The v1 default backend is Core.  Namespace-local ids prove that its
+    # bpf_get_ns_current_pid_tgid filter saw the target namespace, rather than
+    # accepting the host PID or silently switching to BCC.
+    assert all(event["pid"] == target_ns_pid for event in events), text
+    assert all(event["tid"] == target_ns_pid for event in events), text
+    assert all(event["pid"] != host_pid for event in events), text

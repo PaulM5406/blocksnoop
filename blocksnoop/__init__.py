@@ -1,3 +1,3 @@
-"""blocksnoop — detect blocking calls in asyncio event loops using eBPF + py-spy."""
+"""blocksnoop — detect asyncio event-loop blocking with eBPF and Austin."""
 
-__version__ = "0.10.1"
+__version__ = "0.11.0"

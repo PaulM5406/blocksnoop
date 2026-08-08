@@ -320,7 +320,20 @@ class BccDetector:
         self._poll_error: Exception | None = None
 
     def start(self) -> None:
-        """Compile, attach and begin polling the BCC program."""
+        """Compile, attach and begin polling, with a stable CLI-facing error."""
+        try:
+            self._start()
+        except BccDetectorError:
+            raise
+        except Exception as exc:
+            self._bpf = None
+            self._thread = None
+            raise BccDetectorError(
+                f"BCC failed to compile or attach its probes: {exc}"
+            ) from exc
+
+    def _start(self) -> None:
+        """Internal BCC startup; all failures are normalised by ``start``."""
         if self._thread is not None:
             return
         with self._loss_lock:

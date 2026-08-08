@@ -2,10 +2,13 @@
 
 import errno
 import io
+import json
 import logging
+import signal
+import sys
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import Mock, patch
+from unittest.mock import Mock, call, patch
 
 import pytest
 
@@ -13,8 +16,9 @@ from blocksnoop.cli import (
     _build_sinks,
     _parse_args,
     _resolve_target,
-    _run_normal,
     _run_loop,
+    _run_normal,
+    _run_stats,
     _validate_environment,
     main,
 )
@@ -54,7 +58,7 @@ def test_parse_args_defaults():
     assert args.target == "1234"
     assert args.threshold is None
     assert args.stats is False
-    assert args.backend == "bcc"
+    assert args.backend == "core"
     assert args.tid is None
     assert args.json_mode is False
     assert args.log_file is None
@@ -64,6 +68,9 @@ def test_parse_args_defaults():
     assert args.verbose is False
     assert args.error_threshold == 500.0
     assert args.correlation_padding == 200.0
+    assert args.summary_only is False
+    assert args.fail_on == "none"
+    assert args.fail_on_loss is False
 
 
 def test_parse_args_all_flags():
@@ -166,7 +173,7 @@ def test_run_loop_rolls_back_partial_start() -> None:
 
     stop.assert_called_once_with()
     check_health.assert_not_called()
-    on_exit.assert_called_once_with()
+    on_exit.assert_called_once_with("runtime_error")
 
 
 def test_run_loop_reaps_child_when_start_fails() -> None:
@@ -179,6 +186,36 @@ def test_run_loop_reaps_child_when_start_fails() -> None:
 
     child.terminate.assert_called_once_with()
     child.wait.assert_called_once_with(timeout=5)
+
+
+def test_run_loop_keyboard_interrupt_during_start_cleans_up_and_exits_130() -> None:
+    child = Mock()
+    child.poll.return_value = None
+    stop = Mock()
+    on_exit = Mock()
+    with (
+        patch("blocksnoop.cli.signal.signal"),
+        pytest.raises(SystemExit, match="130"),
+    ):
+        _run_loop(Mock(side_effect=KeyboardInterrupt), stop, Mock(), on_exit, child)
+
+    stop.assert_called_once_with()
+    on_exit.assert_called_once_with("signal")
+    child.terminate.assert_called_once_with()
+    child.wait.assert_called_once_with(timeout=5)
+
+
+def test_run_loop_stop_failure_marks_session_as_runtime_error() -> None:
+    child = Mock()
+    child.poll.return_value = 0
+    stop = Mock(side_effect=RuntimeError("detach failed"))
+    on_exit = Mock()
+
+    with pytest.raises(RuntimeError, match="detach failed"):
+        _run_loop(Mock(), stop, Mock(), on_exit, child)
+
+    on_exit.assert_called_once_with("runtime_error")
+    assert child.wait.call_args_list == [call(), call(timeout=5)]
 
 
 def test_run_loop_checks_health_and_reaps_running_child() -> None:
@@ -203,6 +240,28 @@ def test_run_loop_checks_health_in_pid_mode() -> None:
         _run_loop(Mock(), Mock(), check_health, Mock(), None)
 
     check_health.assert_called_once_with()
+
+
+def test_run_loop_sigterm_cleans_up_then_uses_conventional_exit_code() -> None:
+    handlers: dict[int, object] = {}
+
+    def register(signum: int, handler: object) -> None:
+        handlers[signum] = handler
+
+    def trigger_sigterm() -> None:
+        handler = handlers[signal.SIGTERM]
+        handler(signal.SIGTERM, None)  # type: ignore[operator]
+
+    stop = Mock()
+    on_exit = Mock()
+    with (
+        patch("blocksnoop.cli.signal.signal", side_effect=register),
+        pytest.raises(SystemExit, match="143"),
+    ):
+        _run_loop(Mock(), stop, trigger_sigterm, on_exit, None)
+
+    stop.assert_called_once_with()
+    on_exit.assert_called_once_with("signal")
 
 
 # ---------------------------------------------------------------------------
@@ -234,7 +293,7 @@ def test_validate_stats_mode_skips_austin():
         patch.dict("sys.modules", {"bcc": fake_bcc}),
     ):
         # Should NOT raise — stats mode skips the Austin check
-        _validate_environment(stats_mode=True)
+        _validate_environment(stats_mode=True, backend="bcc")
 
 
 def test_validate_core_backend_does_not_require_bcc(capsys):
@@ -253,7 +312,7 @@ def test_validate_missing_bcc_error(capsys):
         patch.dict("sys.modules", {"bcc": None}),
         pytest.raises(SystemExit, match="1"),
     ):
-        _validate_environment()
+        _validate_environment(backend="bcc")
     captured = capsys.readouterr()
     assert "bcc" in captured.err
     assert "https://github.com/iovisor/bcc/blob/master/INSTALL.md" in captured.err
@@ -272,7 +331,9 @@ def test_doctor_json_is_read_only_and_reports_backend(capsys):
     ):
         main()
     assert '"requested_backend": "core"' in capsys.readouterr().out
-    doctor.assert_called_once_with("core", target_pid=None, target_tid=None)
+    doctor.assert_called_once_with(
+        "core", target_pid=None, target_tid=None, stats_mode=False
+    )
     validate.assert_not_called()
 
 
@@ -423,7 +484,9 @@ def test_doctor_json_parses_options_after_target(capsys) -> None:
     ):
         main()
     assert '"effective_backend": "core"' in capsys.readouterr().out
-    doctor.assert_called_once_with("core", target_pid=1234, target_tid=None)
+    doctor.assert_called_once_with(
+        "core", target_pid=1234, target_tid=None, stats_mode=False
+    )
 
 
 def test_normal_summary_receives_detector_losses_without_stderr_warning() -> None:
@@ -439,12 +502,13 @@ def test_normal_summary_receives_detector_losses_without_stderr_warning() -> Non
         env="",
         no_color=True,
         verbose=False,
+        summary_only=False,
     )
     detector = Mock()
     detector.loss_counts = {"kernel": 4}
 
     def run_loop(*args: object, **kwargs: object) -> None:
-        args[3]()  # on_exit, after the detector would have been stopped
+        args[3]("clean")  # on_exit, after the detector would have been stopped
 
     with (
         patch("blocksnoop.cli.Reporter") as reporter_class,
@@ -461,6 +525,37 @@ def test_normal_summary_receives_detector_losses_without_stderr_warning() -> Non
         "kernel": 4
     }
     legacy_warning.assert_not_called()
+
+
+def test_stats_json_uses_parseable_stdout() -> None:
+    args = SimpleNamespace(
+        backend="core",
+        threshold=0.0,
+        tid=None,
+        json_mode=True,
+        verbose=False,
+    )
+    detector = Mock()
+    detector.loss_counts = {}
+    stdout = io.StringIO()
+
+    def run_loop(*callbacks: object, **kwargs: object) -> int:
+        callbacks[0]()  # start
+        callbacks[1]()  # stop prints the final stats record
+        kwargs["on_exit"]("clean")
+        return 0
+
+    with (
+        patch("blocksnoop.cli.sys.stdout", stdout),
+        patch("blocksnoop.cli.create_detector", return_value=detector),
+        patch("blocksnoop.cli._run_loop", side_effect=run_loop),
+    ):
+        assert _run_stats(args, 1234, None) == 0
+
+    records = [json.loads(line) for line in stdout.getvalue().splitlines()]
+    assert len(records) == 1
+    assert records[0]["pid"] == 1234
+    assert records[0]["count"] == 0
 
 
 # ---------------------------------------------------------------------------
@@ -526,6 +621,68 @@ def test_verbose_sets_debug_level():
     assert mock_basic_config.call_args.kwargs["level"] == logging.DEBUG
 
 
+def test_json_launch_reserves_stdout_for_ndjson():
+    reporter = Mock()
+    reporter.policy_failed.return_value = False
+    with (
+        patch("blocksnoop.cli._validate_environment"),
+        patch("blocksnoop.cli._run_normal", return_value=(0, reporter)),
+        patch("subprocess.Popen") as popen,
+        patch("sys.argv", ["blocksnoop", "--json", "--", "python", "app.py"]),
+    ):
+        popen.return_value.pid = 1234
+        main()
+
+    assert popen.call_args.kwargs["stdout"] is sys.stderr
+
+
+def test_stats_json_launch_also_reserves_stdout_for_ndjson():
+    with (
+        patch("blocksnoop.cli._validate_environment"),
+        patch("blocksnoop.cli._run_stats", return_value=0),
+        patch("subprocess.Popen") as popen,
+        patch(
+            "sys.argv", ["blocksnoop", "--stats", "--json", "--", "python", "app.py"]
+        ),
+    ):
+        popen.return_value.pid = 1234
+        main()
+
+    assert popen.call_args.kwargs["stdout"] is sys.stderr
+
+
+def test_child_exit_code_is_propagated_before_policy():
+    reporter = Mock()
+    reporter.policy_failed.return_value = True
+    with (
+        patch("blocksnoop.cli._validate_environment"),
+        patch("blocksnoop.cli._run_normal", return_value=(42, reporter)),
+        patch("sys.argv", ["blocksnoop", "--", "python", "app.py"]),
+        patch("subprocess.Popen") as popen,
+        pytest.raises(SystemExit, match="42"),
+    ):
+        popen.return_value.pid = 1234
+        main()
+    reporter.policy_failed.assert_not_called()
+
+
+def test_policy_failure_exits_three_after_clean_child():
+    reporter = Mock()
+    reporter.policy_failed.return_value = True
+    with (
+        patch("blocksnoop.cli._validate_environment"),
+        patch("blocksnoop.cli._run_normal", return_value=(0, reporter)),
+        patch(
+            "sys.argv", ["blocksnoop", "--fail-on", "event", "--", "python", "app.py"]
+        ),
+        patch("subprocess.Popen") as popen,
+        pytest.raises(SystemExit, match="3"),
+    ):
+        popen.return_value.pid = 1234
+        main()
+    reporter.policy_failed.assert_called_once_with("event", fail_on_loss=False)
+
+
 def test_core_runtime_error_is_user_facing_without_traceback(capsys) -> None:
     with (
         patch("blocksnoop.cli._validate_environment"),
@@ -550,7 +707,7 @@ def test_bcc_runtime_error_is_user_facing_without_traceback(capsys) -> None:
             "blocksnoop.cli._run_normal",
             side_effect=BccDetectorError("perf buffer stopped"),
         ),
-        patch("sys.argv", ["blocksnoop", "1234"]),
+        patch("sys.argv", ["blocksnoop", "--backend", "bcc", "1234"]),
         pytest.raises(SystemExit, match="1"),
     ):
         main()
@@ -569,7 +726,7 @@ def test_missing_austin_produces_clear_error(capsys):
     """Missing Austin should crash with a clear error."""
     with (
         patch("blocksnoop.cli.check_austin_available", return_value=False),
-        patch("sys.argv", ["blocksnoop", "1234"]),
+        patch("sys.argv", ["blocksnoop", "--backend", "bcc", "1234"]),
         pytest.raises(SystemExit, match="1"),
     ):
         main()
@@ -582,7 +739,7 @@ def test_missing_bcc_produces_clear_error(capsys):
     with (
         patch("blocksnoop.cli.check_austin_available", return_value=True),
         patch.dict("sys.modules", {"bcc": None}),
-        patch("sys.argv", ["blocksnoop", "1234"]),
+        patch("sys.argv", ["blocksnoop", "--backend", "bcc", "1234"]),
         pytest.raises(SystemExit, match="1"),
     ):
         main()

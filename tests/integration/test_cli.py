@@ -1,7 +1,9 @@
 """Integration tests for CLI behavior."""
 
 import json
+import shlex
 import subprocess
+from pathlib import Path
 
 import pytest
 
@@ -23,6 +25,7 @@ def test_no_args_shows_error(docker_image):
 
 def test_human_readable_output(docker_image):
     """Without --json, console output goes to stderr and contains BLOCKED markers."""
+    workload = Path("tests/fixtures/blocking_io.py").read_text()
     proc = subprocess.run(
         [
             "docker",
@@ -38,7 +41,8 @@ def test_human_readable_output(docker_image):
             "100",
             "--",
             "python",
-            "tests/fixtures/blocking_io.py",
+            "-c",
+            workload,
         ],
         capture_output=True,
         text=True,
@@ -51,6 +55,7 @@ def test_human_readable_output(docker_image):
 
 def test_log_file_output(docker_image):
     """--log-file writes Datadog-compatible JSON lines to the specified file."""
+    workload = shlex.quote(Path("tests/fixtures/blocking_io.py").read_text())
     proc = subprocess.run(
         [
             "docker",
@@ -62,7 +67,7 @@ def test_log_file_output(docker_image):
             "-c",
             "timeout --signal=TERM 8 "
             "blocksnoop --log-file /tmp/blocksnoop_test.json --service test-svc --env ci "
-            "-t 100 -- python tests/fixtures/blocking_io.py; "
+            f"-t 100 -- python -c {workload}; "
             "cat /tmp/blocksnoop_test.json",
         ],
         capture_output=True,
@@ -75,8 +80,12 @@ def test_log_file_output(docker_image):
         f"Expected JSON lines in log file, got:\n{proc.stdout[:500]}"
     )
 
-    for line in lines:
-        record = json.loads(line)
+    records = [json.loads(line) for line in lines]
+    assert records[0]["type"] == "session_start"
+    assert records[-1]["type"] == "session_summary"
+    assert any(record["type"] == "blocking_event" for record in records)
+
+    for record in records:
         assert "timestamp" in record
         assert "level" in record
         assert record["source"] == "blocksnoop"

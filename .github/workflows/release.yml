@@ -294,9 +294,11 @@ jobs:
 
           report = json.loads(Path("/tmp/blocksnoop-doctor-report.json").read_text())
           checks = {check["name"]: check for check in report["checks"]}
+          assert report["schema"] == "blocksnoop.doctor/v1"
+          assert report["mode"] == "capture"
           assert checks["sidecar"]["status"] == "pass"
           assert checks["bpf_object"]["status"] == "pass"
-          assert checks["bcc"]["status"] == "warn"
+          assert "bcc" not in checks
           PY
           then
             echo "::error::blocksnoop doctor did not emit a valid JSON report" >&2
@@ -351,8 +353,10 @@ jobs:
         include:
           - arch: amd64
             runner: ubuntu-24.04
+            kernel_arch: x86_64
           - arch: arm64
             runner: ubuntu-24.04-arm
+            kernel_arch: aarch64
     steps:
       - uses: actions/checkout@v4
       - uses: astral-sh/setup-uv@v5
@@ -386,6 +390,50 @@ jobs:
           PUBLISHED_IMAGE=$(docker image inspect "$IMAGE" --format '{{ index .RepoDigests 0 }}')
           echo "Published image: $PUBLISHED_IMAGE"
           echo "PUBLISHED_IMAGE=$PUBLISHED_IMAGE" >> "$GITHUB_ENV"
+      - name: Attest the real kernel visible to the published privileged image
+        run: |
+          set -euo pipefail
+          docker run --rm --privileged \
+            -v /sys/kernel/debug:/sys/kernel/debug:ro \
+            -v "$GITHUB_WORKSPACE:/workspace:ro" \
+            -v "$GITHUB_WORKSPACE:/output" \
+            "$PUBLISHED_IMAGE" \
+            python /workspace/scripts/kernel_contract.py \
+              --require-arch "${{ matrix.kernel_arch }}" \
+              --output /output/release-kernel-contract-${{ matrix.arch }}.json
+      - name: Require the Core doctor contract in the published privileged image
+        run: |
+          set -euo pipefail
+          docker run --rm --privileged \
+            -v /sys/kernel/debug:/sys/kernel/debug:ro \
+            -v "$GITHUB_WORKSPACE:/output" \
+            "$PUBLISHED_IMAGE" \
+            sh -ec 'blocksnoop doctor --backend core --json > /output/release-core-doctor-${{ matrix.arch }}.json'
+          python - <<'PY'
+          import json
+          from pathlib import Path
+
+          report = json.loads(
+              Path("release-core-doctor-${{ matrix.arch }}.json").read_text()
+          )
+          checks = {check["name"]: check for check in report["checks"]}
+          required = {
+              "platform", "root", "tracepoints", "privileges",
+              "pid_namespace_helper", "sidecar", "bpf_object", "austin",
+          }
+          assert report["effective_backend"] == "core", report
+          assert required <= checks.keys(), checks
+          assert all(checks[name]["status"] == "pass" for name in required), checks
+          assert "bcc" not in checks, checks
+          PY
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: release-kernel-contract-${{ matrix.arch }}
+          path: |
+            release-kernel-contract-${{ matrix.arch }}.json
+            release-core-doctor-${{ matrix.arch }}.json
+          if-no-files-found: error
       - name: Smoke native and Python artifacts
         run: |
           docker run --rm "$PUBLISHED_IMAGE" sh -c \
@@ -394,16 +442,46 @@ jobs:
         run: |
           BLOCKSNOOP_TEST_IMAGE="$PUBLISHED_IMAGE" uv run pytest \
             tests/integration/test_core_only_image.py -v
-      - name: Detect a real blocking workload with Core
+      - name: Detect a real blocking workload with the default backend
         run: |
           set -o pipefail
           timeout 30 docker run --rm --privileged --pid=host \
             -v /sys/kernel/debug:/sys/kernel/debug \
-            "$PUBLISHED_IMAGE" blocksnoop --backend core --json -t 100 -- \
+            "$PUBLISHED_IMAGE" blocksnoop --json -t 100 -- \
             python -c 'import asyncio,time; exec("async def main():\n for _ in range(4):\n  time.sleep(0.25)\n  await asyncio.sleep(0.05)"); asyncio.run(main())' \
-            | python -c 'import json,sys; events=[item for line in sys.stdin if (item := json.loads(line)) and "duration_ms" in item]; assert events; assert all(item["duration_ms"] >= 100 for item in events); print(f"published Core events: {len(events)}")'
-      - name: Detect same and private PID namespaces with Core
+            | python -c 'import json,sys; events=[item for line in sys.stdin if (item := json.loads(line)).get("type") == "blocking_event"]; assert events; assert all(item["duration_ms"] >= 100 for item in events); print(f"published default-backend events: {len(events)}")'
+      - name: Validate the published structured log lifecycle
+        run: |
+          set -euo pipefail
+          LOG_DIR="$RUNNER_TEMP/blocksnoop-log-${{ matrix.arch }}"
+          mkdir -p "$LOG_DIR"
+          chmod 0777 "$LOG_DIR"
+          timeout 30 docker run --rm --privileged --pid=host \
+            -v /sys/kernel/debug:/sys/kernel/debug \
+            -v "$LOG_DIR:/output" \
+            "$PUBLISHED_IMAGE" blocksnoop \
+            --log-file /output/events.json --service release-smoke --env ci \
+            -t 100 -- \
+            python -c 'import asyncio,time; exec("async def main():\n for _ in range(3):\n  time.sleep(0.2)\n  await asyncio.sleep(0.05)"); asyncio.run(main())'
+          LOG_FILE="$LOG_DIR/events.json" python - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+
+          records = [
+              json.loads(line)
+              for line in Path(os.environ["LOG_FILE"]).read_text().splitlines()
+          ]
+          assert records[0]["type"] == "session_start", records
+          assert records[-1]["type"] == "session_summary", records
+          assert any(record["type"] == "blocking_event" for record in records), records
+          assert all(record["schema"] == "blocksnoop.events/v1" for record in records)
+          assert all(record["level"] and record["message"] for record in records)
+          assert all(record["source"] == "blocksnoop" for record in records)
+          assert all(record["dd"]["service"] == "release-smoke" for record in records)
+          PY
+      - name: Detect same and private PID namespaces with the default backend
         run: |
           BLOCKSNOOP_TEST_IMAGE="$PUBLISHED_IMAGE" uv run pytest \
             tests/integration/test_core_backend.py \
-            tests/integration/test_cross_pid_namespace.py -v -k core
+            tests/integration/test_cross_pid_namespace.py -v
