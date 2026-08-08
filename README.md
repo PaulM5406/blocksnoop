@@ -60,12 +60,18 @@ current tracepoint-only program does not
 read kernel structures, so the precompiled object has no kernel-layout
 relocations despite carrying BTF metadata.
 
-The official Docker image contains the native sidecar. A source checkout or
-unpacked source distribution can build it on Linux with `make -C native` and
-place `native/blocksnoop-ebpf` on `PATH`. The portable PyPI wheel does not yet
-contain a platform-specific sidecar; in that installation the CLI reports the
-missing capability and suggests `--backend bcc`. A forced Core backend never
-silently falls back to BCC.
+On `linux/amd64` and `linux/arm64`, PyPI selects a native wheel containing the
+sidecar and precompiled object, so `pip install blocksnoop` is sufficient for
+Core itself; Austin and the required privileges are still host prerequisites.
+Other platforms receive the portable compatibility wheel without native
+assets. A source checkout or unpacked source distribution can build the
+sidecar on Linux with `make -C native` and place `native/blocksnoop-ebpf` on
+`PATH`.
+
+The official Docker image is intentionally **Core-only**: it installs the
+native wheel and Austin, but not BCC or kernel headers. Use `--backend core`
+explicitly in that image. A forced Core backend never silently falls back to
+BCC.
 
 Before attaching, inspect the exact environment and optional target without
 loading BPF or spawning the sidecar:
@@ -204,18 +210,20 @@ blocksnoop requires kernel access, so Docker containers need `--privileged` and 
 # Pull from Docker Hub
 docker pull oloapm/blocksnoop
 
-# Attach to a process on the host
+# Check that the host kernel can run the Core backend
 docker run --rm --privileged --pid=host \
   -v /sys/kernel/debug:/sys/kernel/debug \
-  oloapm/blocksnoop blocksnoop -t 100 <PID>
+  oloapm/blocksnoop blocksnoop doctor --backend core --json
 
-# Use the precompiled libbpf backend explicitly
+# Attach to a process on the host with the precompiled libbpf backend
 docker run --rm --privileged --pid=host \
   -v /sys/kernel/debug:/sys/kernel/debug \
   oloapm/blocksnoop blocksnoop --backend core -t 100 <PID>
 
 # Launch and monitor a process
-docker run --rm --privileged --pid=host oloapm/blocksnoop blocksnoop -t 100 -- python app.py
+docker run --rm --privileged --pid=host \
+  -v /sys/kernel/debug:/sys/kernel/debug \
+  oloapm/blocksnoop blocksnoop --backend core -t 100 -- python app.py
 ```
 
 For local development:
@@ -230,7 +238,23 @@ services:
 ```
 
 ```bash
-docker compose run --rm blocksnoop blocksnoop -t 100 -- python app.py
+docker compose run --rm blocksnoop blocksnoop --backend core -t 100 -- python app.py
+```
+
+The image is published for `linux/amd64` and `linux/arm64`. It has no BCC
+fallback: a Core prerequisite failure is reported directly. For a local image
+smoke before attaching to a workload:
+
+```bash
+docker build -t blocksnoop:local .
+docker run --rm blocksnoop:local python -c '
+from blocksnoop.core_backend import find_sidecar
+assert find_sidecar()
+'
+docker run --rm blocksnoop:local sh -ec '
+  austin --version >/dev/null
+  python -c "import importlib.util; assert importlib.util.find_spec(\"bcc\") is None"
+'
 ```
 
 ## Kubernetes

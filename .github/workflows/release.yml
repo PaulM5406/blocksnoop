@@ -36,9 +36,21 @@ jobs:
           exit 1
 
   build:
-    name: Build packages
+    name: Build packages (${{ matrix.arch }})
     needs: [ci-check]
-    runs-on: ubuntu-latest
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x86_64
+            runner: ubuntu-24.04
+            readelf_machine: X86-64
+            build_sdist: true
+          - arch: aarch64
+            runner: ubuntu-24.04-arm
+            readelf_machine: AArch64
+            build_sdist: false
     steps:
       - uses: actions/checkout@v4
       - uses: astral-sh/setup-uv@v5
@@ -46,11 +58,49 @@ jobs:
         run: |
           VERSION=$(python -c 'import tomllib; print(tomllib.load(open("pyproject.toml", "rb"))["project"]["version"])')
           test "${GITHUB_REF_NAME#v}" = "$VERSION"
-      - run: uv build
+      - name: Build the universal compatibility wheel and source distribution once
+        if: matrix.build_sdist
+        run: uv build --wheel --sdist
+      - name: Build and repair the wheel in its native manylinux container
+        env:
+          ARCH: ${{ matrix.arch }}
+        run: |
+          set -euo pipefail
+          docker run --rm \
+            -v "$GITHUB_WORKSPACE:/project" \
+            -w /project \
+            "quay.io/pypa/manylinux_2_28_${ARCH}" \
+            bash -ec '
+              dnf install -y dnf-plugins-core
+              dnf config-manager --set-enabled powertools
+              dnf install -y clang gcc make libbpf-devel elfutils-libelf-devel zlib-devel pkgconf-pkg-config
+              /opt/python/cp312-cp312/bin/python -m pip install --no-cache-dir auditwheel
+              export PATH=/opt/python/cp312-cp312/bin:$PATH
+              LOADER_CPPFLAGS=-DBLOCKSNOOP_LIBBPF_LEGACY_PERF_BUFFER \
+                WHEEL_OUTPUT_DIR=/project/wheelhouse scripts/build_native_wheel.sh
+            '
+      - name: Verify native wheel ABI and assets
+        env:
+          ARCH: ${{ matrix.arch }}
+          MACHINE: ${{ matrix.readelf_machine }}
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          wheels=(wheelhouse/*.whl)
+          test "${#wheels[@]}" = 1
+          wheel="${wheels[0]}"
+          python scripts/verify_native_wheel.py --wheel "$wheel" --arch "$ARCH"
+          python -m pip install --disable-pip-version-check auditwheel
+          auditwheel show "$wheel" | grep -q "manylinux_2_28_${ARCH}"
+          unzip -p "$wheel" blocksnoop/_native/blocksnoop-ebpf >/tmp/blocksnoop-ebpf
+          readelf -h /tmp/blocksnoop-ebpf | grep -q "Machine:.*$MACHINE"
+          mkdir -p dist
+          cp "$wheel" dist/
       - uses: actions/upload-artifact@v4
         with:
-          name: dist
+          name: dist-${{ matrix.arch }}
           path: dist/
+          if-no-files-found: error
 
   publish:
     name: Publish to PyPI
@@ -62,25 +112,48 @@ jobs:
     steps:
       - uses: actions/download-artifact@v4
         with:
-          name: dist
+          pattern: dist-*
           path: dist/
+          merge-multiple: true
+      - name: Require one sdist, one universal wheel, and two native wheels
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          sdists=(dist/*.tar.gz)
+          wheels=(dist/*.whl)
+          universal=(dist/*-py3-none-any.whl)
+          test "${#sdists[@]}" = 1
+          test "${#wheels[@]}" = 3
+          test "${#universal[@]}" = 1
+          ls dist/*manylinux_2_28_x86_64.whl \
+            dist/*manylinux_2_28_aarch64.whl >/dev/null
       - uses: pypa/gh-action-pypi-publish@release/v1
         with:
           packages-dir: dist/
           skip-existing: true
 
   smoke-pypi:
-    name: Test published PyPI artifacts
+    name: Test published PyPI artifacts (${{ matrix.arch }})
     needs: [publish]
-    runs-on: ubuntu-latest
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x86_64
+            runner: ubuntu-24.04
+          - arch: aarch64
+            runner: ubuntu-24.04-arm
     env:
       VENV: /tmp/blocksnoop-pypi-smoke
     steps:
+      - uses: actions/checkout@v4
       - uses: astral-sh/setup-uv@v5
       - uses: actions/download-artifact@v4
         with:
-          name: dist
+          pattern: dist-*
           path: dist/
+          merge-multiple: true
       - name: Wait for exact version and verify uploaded hashes
         env:
           VERSION: ${{ github.ref_name }}
@@ -152,7 +225,8 @@ jobs:
           VERSION=${VERSION#v}
           uv venv --clear --python 3.12 "$VENV"
           for i in $(seq 1 20); do
-            if uv pip install --no-cache --index-url https://pypi.org/simple \
+            if uv pip install --no-cache --only-binary=:all: \
+              --index-url https://pypi.org/simple \
               --python "$VENV/bin/python" "blocksnoop==$VERSION"; then
               break
             fi
@@ -179,6 +253,14 @@ jobs:
           assert root.joinpath("bpf/core_types.h").is_file()
           PY
           "$VENV/bin/blocksnoop" --help
+          ARCH="${{ matrix.arch }}"
+          "$VENV/bin/python" "$GITHUB_WORKSPACE/scripts/verify_native_wheel.py" \
+            --installed --arch "$ARCH"
+          "$VENV/bin/python" - <<'PY'
+          import importlib.util
+
+          assert importlib.util.find_spec("bcc") is None
+          PY
           "$VENV/bin/python" - <<'PY'
           import glob
           import os
@@ -197,7 +279,7 @@ jobs:
                   for member in archive.getmembers()
               ), "source distribution is missing native/blocksnoop_ebpf.c"
           PY
-      - name: Verify wheel-only Core diagnostics fail cleanly
+      - name: Verify the published wheel exposes Core assets without BCC
         run: |
           set +e
           "$VENV/bin/blocksnoop" doctor \
@@ -205,15 +287,16 @@ jobs:
             2>/tmp/blocksnoop-doctor-stderr
           STATUS=$?
           set -e
-          test "$STATUS" = 1
+          test "$STATUS" = 0 || test "$STATUS" = 1
           if ! "$VENV/bin/python" - <<'PY'
           import json
           from pathlib import Path
 
           report = json.loads(Path("/tmp/blocksnoop-doctor-report.json").read_text())
-          assert report["effective_backend"] is None
-          sidecar = next(check for check in report["checks"] if check["name"] == "sidecar")
-          assert sidecar["status"] == "fail"
+          checks = {check["name"]: check for check in report["checks"]}
+          assert checks["sidecar"]["status"] == "pass"
+          assert checks["bpf_object"]["status"] == "pass"
+          assert checks["bcc"]["status"] == "warn"
           PY
           then
             echo "::error::blocksnoop doctor did not emit a valid JSON report" >&2
@@ -259,9 +342,17 @@ jobs:
           cache-to: type=gha,mode=max
 
   smoke-docker:
-    name: Test published Docker image
+    name: Test published Docker image (${{ matrix.arch }})
     needs: [docker]
-    runs-on: ubuntu-latest
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: amd64
+            runner: ubuntu-24.04
+          - arch: arm64
+            runner: ubuntu-24.04-arm
     steps:
       - uses: actions/checkout@v4
       - uses: astral-sh/setup-uv@v5
@@ -284,7 +375,9 @@ jobs:
             fi
             sleep 15
           done
-          docker pull --platform linux/amd64 "$IMAGE"
+          docker pull --platform linux/${{ matrix.arch }} "$IMAGE"
+          test "$(docker image inspect "$IMAGE" --format '{{.Architecture}}')" = \
+            "${{ matrix.arch }}"
           REVISION=$(docker image inspect "$IMAGE" \
             --format '{{ index .Config.Labels "org.opencontainers.image.revision" }}')
           test "$REVISION" = "$GITHUB_SHA"
@@ -294,7 +387,11 @@ jobs:
       - name: Smoke native and Python artifacts
         run: |
           docker run --rm "$PUBLISHED_IMAGE" sh -c \
-            'blocksnoop --help >/dev/null && blocksnoop-ebpf --help >/dev/null && test -x /usr/local/bin/blocksnoop-ebpf && test -f /usr/local/lib/blocksnoop/core_blockdetect.bpf.o'
+            'blocksnoop --help >/dev/null && python -c "import os, subprocess; from importlib.resources import files; root = files(\"blocksnoop\"); sidecar = root.joinpath(\"_native/blocksnoop-ebpf\"); bpf = root.joinpath(\"bpf/core_blockdetect.bpf.o\"); assert os.access(sidecar, os.X_OK); assert bpf.is_file(); subprocess.run([str(sidecar), \"--help\"], check=True, stdout=subprocess.DEVNULL)"'
+      - name: Prove the image is Core-only and uses packaged native assets
+        run: |
+          BLOCKSNOOP_TEST_IMAGE="$PUBLISHED_IMAGE" uv run pytest \
+            tests/integration/test_core_only_image.py -v
       - name: Detect a real blocking workload with Core
         run: |
           set -o pipefail
@@ -303,8 +400,9 @@ jobs:
             "$PUBLISHED_IMAGE" blocksnoop --backend core --json -t 100 -- \
             python -c 'import asyncio,time; exec("async def main():\n for _ in range(4):\n  time.sleep(0.25)\n  await asyncio.sleep(0.05)"); asyncio.run(main())' \
             | python -c 'import json,sys; events=[item for line in sys.stdin if (item := json.loads(line)) and "duration_ms" in item]; assert events; assert all(item["duration_ms"] >= 100 for item in events); print(f"published Core events: {len(events)}")'
-      - name: Detect across a private PID namespace with Core
+      - name: Detect same and private PID namespaces with Core
         run: |
           uv sync --all-extras --dev
           BLOCKSNOOP_TEST_IMAGE="$PUBLISHED_IMAGE" uv run pytest \
+            tests/integration/test_core_backend.py \
             tests/integration/test_cross_pid_namespace.py -v -k core

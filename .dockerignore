@@ -20,5 +20,10 @@ CHANGELOG.md
 CLAUDE.md
 .gitignore
 .mise.toml
+.env
+.env.*
+*.tar
+*.tar.*
+*.zip
 blocksnoop/bpf/*.bpf.o
 native/blocksnoop-ebpf

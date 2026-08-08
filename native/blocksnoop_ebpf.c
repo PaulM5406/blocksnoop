@@ -445,8 +445,20 @@ int main(int argc, char **argv)
         emit_fatal("BPF object is missing the events map");
         goto cleanup;
     }
+#ifdef BLOCKSNOOP_LIBBPF_LEGACY_PERF_BUFFER
+    /* libbpf 0.5, used by the manylinux_2_28 baseline, stores callbacks in
+     * perf_buffer_opts. libbpf 0.6+ accepts them as direct arguments. */
+    struct perf_buffer_opts perf_buffer_options = {
+        .sample_cb = handle_sample,
+        .lost_cb = handle_lost,
+        .ctx = &config,
+    };
+    perf_buffer = perf_buffer__new(bpf_map__fd(map), PERF_BUFFER_PAGES,
+                                   &perf_buffer_options);
+#else
     perf_buffer = perf_buffer__new(bpf_map__fd(map), PERF_BUFFER_PAGES,
                                    handle_sample, handle_lost, &config, NULL);
+#endif
     if (libbpf_get_error(perf_buffer)) {
         perf_buffer = NULL;
         emit_fatal("could not create perf buffer");

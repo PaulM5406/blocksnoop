@@ -12,9 +12,14 @@ Build on Linux with libbpf development headers and clang:
 make -C native
 ```
 
+The official Docker image builds this loader and object in a target-architecture
+builder stage, embeds them in a native wheel, and ships only that wheel, Austin,
+and the libbpf runtime libraries. It deliberately does not contain BCC or
+kernel headers; invoke it with `--backend core`.
+
 The loader supports three stable relative layouts: the repository
 (`native/blocksnoop-ebpf` next to `blocksnoop/bpf/`), an installed Python
-package (`blocksnoop/native/` next to `blocksnoop/bpf/`), or an object
+package (`blocksnoop/_native/` next to `blocksnoop/bpf/`), or an object
 co-located with the binary. Deployments can always make the location explicit
 with `--bpf-object PATH` or `BLOCKSNOOP_BPF_OBJECT`.
 

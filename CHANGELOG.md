@@ -1,5 +1,17 @@
 # Changelog
 
+## [v0.10.0] - 2026-08-08
+
+### Added
+
+- PyPI now publishes native `linux/amd64` and `linux/arm64` wheels containing the CO-RE sidecar and precompiled BPF object. Linux installs can use `--backend core` directly after `pip install blocksnoop`; a portable wheel remains available for CLI and compatibility use on other platforms.
+- CI and release gates inspect the wheel tags and ELF architectures, install both native wheels on matching runners, and verify the exact artifacts again after PyPI publication.
+
+### Changed
+
+- The official multi-architecture Docker image is now Core-only and installs Blocksnoop from a native wheel. Its runtime no longer contains BCC, kernel headers, build tools, or `uv`.
+- Published Docker images are exercised on native amd64 and arm64 runners, including real Core collection and private PID-namespace integration.
+
 ## [v0.9.2] - 2026-08-08
 
 ### Fixed
