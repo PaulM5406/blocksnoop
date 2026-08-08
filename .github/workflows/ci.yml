@@ -37,9 +37,81 @@ jobs:
       - run: make -C native test
       - run: readelf -S blocksnoop/bpf/core_blockdetect.bpf.o | grep -E '\.BTF(\.ext)?'
 
+  native-wheel:
+    name: Native wheel (${{ matrix.arch }})
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x86_64
+            runner: ubuntu-24.04
+            readelf_machine: X86-64
+          - arch: aarch64
+            runner: ubuntu-24.04-arm
+            readelf_machine: AArch64
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build and repair the wheel in its native manylinux container
+        env:
+          ARCH: ${{ matrix.arch }}
+        run: |
+          set -euo pipefail
+          docker run --rm \
+            -v "$GITHUB_WORKSPACE:/project" \
+            -w /project \
+            "quay.io/pypa/manylinux_2_28_${ARCH}" \
+            bash -ec '
+              dnf install -y dnf-plugins-core
+              dnf config-manager --set-enabled powertools
+              dnf install -y clang gcc make libbpf-devel elfutils-libelf-devel zlib-devel pkgconf-pkg-config
+              /opt/python/cp312-cp312/bin/python -m pip install --no-cache-dir auditwheel
+              export PATH=/opt/python/cp312-cp312/bin:$PATH
+              WHEEL_OUTPUT_DIR=/project/wheelhouse scripts/build_native_wheel.sh
+            '
+      - name: Verify the repaired wheel contains native Core assets
+        env:
+          ARCH: ${{ matrix.arch }}
+          MACHINE: ${{ matrix.readelf_machine }}
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          wheels=(wheelhouse/*.whl)
+          test "${#wheels[@]}" = 1
+          wheel="${wheels[0]}"
+          python scripts/verify_native_wheel.py --wheel "$wheel" --arch "$ARCH"
+          python -m pip install --disable-pip-version-check auditwheel
+          auditwheel show "$wheel" | grep -q "manylinux_2_28_${ARCH}"
+          unzip -p "$wheel" blocksnoop/_native/blocksnoop-ebpf >/tmp/blocksnoop-ebpf
+          readelf -h /tmp/blocksnoop-ebpf | grep -q "Machine:.*$MACHINE"
+      - name: Install the wheel outside the checkout
+        env:
+          ARCH: ${{ matrix.arch }}
+        run: |
+          set -euo pipefail
+          wheel=(wheelhouse/*.whl)
+          python -m venv /tmp/blocksnoop-native-wheel
+          /tmp/blocksnoop-native-wheel/bin/pip install --no-deps "${wheel[0]}"
+          cd /tmp
+          /tmp/blocksnoop-native-wheel/bin/python \
+            "$GITHUB_WORKSPACE/scripts/verify_native_wheel.py" --installed --arch "$ARCH"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: native-wheel-${{ matrix.arch }}
+          path: wheelhouse/*.whl
+          if-no-files-found: error
+
   core-integration:
-    name: Core backend Docker integration
-    runs-on: ubuntu-latest
+    name: Core backend Docker integration (${{ matrix.arch }})
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x86_64
+            runner: ubuntu-24.04
+          - arch: aarch64
+            runner: ubuntu-24.04-arm
     steps:
       - uses: actions/checkout@v4
       - uses: astral-sh/setup-uv@v5
@@ -50,6 +122,7 @@ jobs:
         run: |
           uv run pytest \
             tests/integration/test_core_backend.py \
+            tests/integration/test_core_only_image.py \
             tests/integration/test_cross_pid_namespace.py \
             -v -k core
 
@@ -67,18 +140,41 @@ jobs:
       - run: uv run pytest tests/ -v --ignore=tests/integration
 
   package:
-    name: Build and install wheel
+    name: Build portable artifacts and install native wheel
+    needs: [native-wheel]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: astral-sh/setup-uv@v5
-      - run: uv build
+      - run: uv build --wheel --sdist
       - run: tar -tf dist/*.tar.gz | grep -E '/blocksnoop/bpf/blockdetect\.c$'
       - run: tar -tf dist/*.tar.gz | grep -E '/native/blocksnoop_ebpf\.c$'
+      - name: Verify the universal wheel remains installable without native assets
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          portable=("$GITHUB_WORKSPACE"/dist/*-py3-none-any.whl)
+          test "${#portable[@]}" = 1
+          uv venv --python 3.12 /tmp/blocksnoop-portable-wheel
+          uv pip install --python /tmp/blocksnoop-portable-wheel/bin/python \
+            "${portable[0]}"
+          cd /tmp
+          /tmp/blocksnoop-portable-wheel/bin/blocksnoop --help
+          ! unzip -l "${portable[0]}" | grep -q 'blocksnoop/_native/blocksnoop-ebpf'
+          ! unzip -l "${portable[0]}" | grep -q 'blocksnoop/bpf/core_blockdetect\.bpf\.o'
+      - uses: actions/download-artifact@v4
+        with:
+          name: native-wheel-x86_64
+          path: dist/
       - name: Install the wheel in a clean environment outside the checkout
         run: |
+          set -euo pipefail
+          shopt -s nullglob
+          native=("$GITHUB_WORKSPACE"/dist/*manylinux_2_28_x86_64.whl)
+          test "${#native[@]}" = 1
           uv venv --python 3.12 /tmp/blocksnoop-wheel-test
-          uv pip install --python /tmp/blocksnoop-wheel-test/bin/python "$GITHUB_WORKSPACE"/dist/*.whl
+          uv pip install --no-deps --python /tmp/blocksnoop-wheel-test/bin/python "${native[0]}"
           cd /tmp
           /tmp/blocksnoop-wheel-test/bin/python -c 'from importlib.resources import files; root = files("blocksnoop"); assert root.joinpath("bpf/blockdetect.c").is_file(); assert root.joinpath("bpf/core_blockdetect.bpf.c").is_file(); assert root.joinpath("bpf/core_types.h").is_file()'
+          /tmp/blocksnoop-wheel-test/bin/python "$GITHUB_WORKSPACE"/scripts/verify_native_wheel.py --installed --arch x86_64
           /tmp/blocksnoop-wheel-test/bin/blocksnoop --help

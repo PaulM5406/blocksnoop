@@ -17,9 +17,16 @@ $(error Unsupported BPF target architecture: $(UNAME_M))
 endif
 
 BPF_SOURCE := $(ROOT)/blocksnoop/bpf/core_blockdetect.bpf.c
-BPF_OBJECT := $(ROOT)/blocksnoop/bpf/core_blockdetect.bpf.o
 LOADER_SOURCE := $(CURDIR)/blocksnoop_ebpf.c
+OUT_DIR ?=
+
+ifeq ($(OUT_DIR),)
+BPF_OBJECT := $(ROOT)/blocksnoop/bpf/core_blockdetect.bpf.o
 LOADER := $(CURDIR)/blocksnoop-ebpf
+else
+BPF_OBJECT := $(OUT_DIR)/core_blockdetect.bpf.o
+LOADER := $(OUT_DIR)/blocksnoop-ebpf
+endif
 
 # Multiarch distributions keep asm/types.h below this directory. The program
 # itself uses no architecture-specific registers, so the emitted BPF object is
@@ -33,9 +40,11 @@ LIBBPF_LIBS := $(shell $(PKG_CONFIG) --libs libbpf 2>/dev/null || echo -lbpf -le
 all: $(BPF_OBJECT) $(LOADER)
 
 $(BPF_OBJECT): $(BPF_SOURCE) $(ROOT)/blocksnoop/bpf/core_types.h
+	mkdir -p $(dir $@)
 	$(CLANG) $(BPF_CFLAGS) -c $< -o $@
 
 $(LOADER): $(LOADER_SOURCE)
+	mkdir -p $(dir $@)
 	$(CC) -O2 -g -Wall -Wextra -Werror $(LIBBPF_CFLAGS) $< -o $@ $(LIBBPF_LIBS)
 
 test: $(LOADER)

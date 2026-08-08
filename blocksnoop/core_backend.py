@@ -7,8 +7,10 @@ import logging
 import os
 import shutil
 import subprocess
+import sys
 import threading
 from collections.abc import Callable
+from pathlib import Path
 from typing import Any
 
 from blocksnoop.core import BlockingEvent, DetectorConfig, LostEvent
@@ -23,8 +25,24 @@ _LOSS_SOURCES = frozenset(("perf_buffer",))
 
 
 def find_sidecar(executable: str = DEFAULT_SIDECAR) -> str | None:
-    """Resolve a sidecar executable, allowing an explicit test/deploy override."""
-    return shutil.which(os.environ.get("BLOCKSNOOP_EBPF", executable))
+    """Resolve an override, packaged Linux asset, or PATH sidecar in that order."""
+    configured = os.environ.get("BLOCKSNOOP_EBPF")
+    if configured:
+        return shutil.which(configured)
+    if executable == DEFAULT_SIDECAR:
+        packaged = _packaged_sidecar()
+        if packaged is not None:
+            return packaged
+    return shutil.which(executable)
+
+
+def _packaged_sidecar() -> str | None:
+    if sys.platform != "linux":
+        return None
+    candidate = Path(__file__).with_name("_native") / DEFAULT_SIDECAR
+    if candidate.is_file() and os.access(candidate, os.X_OK):
+        return str(candidate)
+    return None
 
 
 class CoreDetectorError(RuntimeError):

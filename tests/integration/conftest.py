@@ -101,11 +101,16 @@ def docker_image():
         pytest.skip("Docker not available")
 
     # Check Docker daemon is running
-    check = subprocess.run(
-        ["docker", "info"],
-        capture_output=True,
-        timeout=10,
-    )
+    try:
+        check = subprocess.run(
+            ["docker", "info"],
+            capture_output=True,
+            timeout=10,
+        )
+    except subprocess.TimeoutExpired:
+        if remote_image:
+            pytest.fail("Docker daemon timed out while smoking BLOCKSNOOP_TEST_IMAGE")
+        pytest.skip("Docker daemon did not respond within 10 seconds")
     if check.returncode != 0:
         if remote_image:
             pytest.fail("Docker daemon is required to smoke BLOCKSNOOP_TEST_IMAGE")
