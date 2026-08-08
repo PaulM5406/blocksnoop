@@ -110,6 +110,13 @@ class ConsoleSink:
         self._stream.write("--- blocksnoop session ---\n")
         self._stream.write(f"Duration: {summary['duration_s']:.1f}s\n")
         self._stream.write(f"Blocking events detected: {summary['event_count']}\n")
+        self._stream.write(f"Lost detector events: {summary['lost_event_count']}\n")
+        if summary["lost_events_by_source"]:
+            losses = ", ".join(
+                f"{source}={count}"
+                for source, count in sorted(summary["lost_events_by_source"].items())
+            )
+            self._stream.write(f"Lost detector events by source: {losses}\n")
 
     def close(self) -> None:
         pass
@@ -202,6 +209,8 @@ class JsonFileSink:
             "source": "blocksnoop",
             "duration_s": summary["duration_s"],
             "event_count": summary["event_count"],
+            "lost_event_count": summary["lost_event_count"],
+            "lost_events_by_source": summary["lost_events_by_source"],
             "dd": {"service": self._service, "env": self._env},
         }
 

@@ -12,7 +12,7 @@ import pytest
 from blocksnoop.backends import create_detector, validate_backend_available
 from blocksnoop.core import BlockingEvent, DetectorConfig
 from blocksnoop.core_backend import CoreDetector, CoreDetectorError, find_sidecar
-from blocksnoop.detector import BccDetector, EbpfDetector
+from blocksnoop.detector import BccDetector, BccDetectorError, EbpfDetector
 
 
 class _FakeProcess:
@@ -47,9 +47,23 @@ def _config() -> DetectorConfig:
 
 
 _READY = (
-    '{"version": 1, "type": "ready", "pid": 1234, "tid": 1235, '
-    '"threshold_ns": 12500000, "tracepoints": ["epoll_wait"]}'
+    '{"version": 2, "type": "ready", "pid": 1234, "tid": 1235, '
+    '"pidns_dev": 7, "pidns_ino": 8, "threshold_ns": 12500000, '
+    '"tracepoints": ["epoll_wait"]}'
 )
+
+
+@pytest.fixture(autouse=True)
+def _resolved_core_namespace() -> object:
+    """Keep Core unit tests independent from host /proc state."""
+    with (
+        patch.object(CoreDetector, "_pid_namespace", return_value=(7, 8)),
+        patch.object(
+            CoreDetector, "_resolve_namespace_pid", side_effect=lambda pid: pid
+        ),
+        patch.object(CoreDetector, "_validate_target_tid"),
+    ):
+        yield
 
 
 def test_bcc_detector_is_the_clear_name_and_legacy_alias() -> None:
@@ -80,6 +94,40 @@ def test_bcc_detector_imports_and_attaches_only_on_start() -> None:
         assert bpf_class.call_count == 0
         detector.start()
         assert bpf_class.call_count == 1
+        detector.stop()
+
+
+def test_bcc_detector_surfaces_poll_failure_and_ignores_it_after_stop() -> None:
+    detector = BccDetector(config=_config(), callback=Mock())
+    detector._bpf = Mock()
+    detector._bpf.perf_buffer_poll.side_effect = RuntimeError("buffer broken")
+
+    detector._poll_loop()
+
+    with pytest.raises(
+        BccDetectorError, match="BCC perf buffer polling failed: buffer broken"
+    ):
+        detector.check_health()
+    detector.stop()
+    detector.check_health()
+
+
+def test_bcc_detector_start_resets_previous_poll_failure() -> None:
+    bpf = MagicMock()
+    bpf.__getitem__.return_value = Mock()
+    detector = BccDetector(config=_config(), callback=Mock())
+    detector._poll_error = RuntimeError("old error")
+    with (
+        patch(
+            "blocksnoop.detector._detect_epoll_syscalls", return_value=["epoll_wait"]
+        ),
+        patch("blocksnoop.detector._get_pidns_info", return_value=None),
+        patch("blocksnoop.detector._ensure_kernel_headers"),
+        patch.object(BccDetector, "_poll_loop"),
+        patch.dict(sys.modules, {"bcc": SimpleNamespace(BPF=Mock(return_value=bpf))}),
+    ):
+        detector.start()
+        assert detector._poll_error is None
         detector.stop()
 
 
@@ -134,8 +182,8 @@ def test_core_detector_decodes_ready_event_and_lost_messages() -> None:
         "\n".join(
             [
                 _READY,
-                '{"version": 1, "type": "event", "start_ns": 10, "end_ns": 20, "pid": 1234, "tid": 1235}',
-                '{"version": 1, "type": "lost", "count": 2}',
+                '{"version": 2, "type": "event", "start_ns": 10, "end_ns": 20, "pid": 1234, "tid": 1235, "pidns_dev": 7, "pidns_ino": 8}',
+                '{"version": 2, "type": "lost", "count": 2, "source": "perf_buffer", "pidns_dev": 7, "pidns_ino": 8}',
             ]
         )
         + "\n"
@@ -153,14 +201,19 @@ def test_core_detector_decodes_ready_event_and_lost_messages() -> None:
     callback.assert_called_once_with(
         BlockingEvent(start_ns=10, end_ns=20, pid=1234, tid=1235)
     )
+    assert detector.loss_counts == {"perf_buffer": 2}
     assert popen.call_args.args[0] == [
         "/bin/sidecar",
         "--protocol-version",
-        "1",
+        "2",
         "--pid",
         "1234",
         "--tid",
         "1235",
+        "--pidns-dev",
+        "7",
+        "--pidns-ino",
+        "8",
         "--threshold-ns",
         "12500000",
     ]
@@ -170,7 +223,7 @@ def test_core_detector_decodes_ready_event_and_lost_messages() -> None:
 
 def test_core_detector_fatal_handshake_reaps_process_and_keeps_stderr_tail() -> None:
     process = _FakeProcess(
-        '{"version": 1, "type": "fatal", "message": "BTF unavailable"}\n',
+        '{"version": 2, "type": "fatal", "message": "BTF unavailable"}\n',
         "kernel details\n",
     )
     with (
@@ -184,8 +237,9 @@ def test_core_detector_fatal_handshake_reaps_process_and_keeps_stderr_tail() -> 
 
 def test_core_detector_rejects_incoherent_ready_handshake() -> None:
     process = _FakeProcess(
-        '{"version": 1, "type": "ready", "pid": 99, "tid": 1235, '
-        '"threshold_ns": 12500000, "tracepoints": ["epoll_wait"]}\n'
+        '{"version": 2, "type": "ready", "pid": 99, "tid": 1235, '
+        '"pidns_dev": 7, "pidns_ino": 8, "threshold_ns": 12500000, '
+        '"tracepoints": ["epoll_wait"]}\n'
     )
     with (
         patch("blocksnoop.core_backend.find_sidecar", return_value="/bin/sidecar"),
@@ -212,9 +266,9 @@ def test_core_detector_rejects_invalid_or_mismatched_events() -> None:
         "\n".join(
             [
                 _READY,
-                '{"version": 1, "type": "event", "start_ns": true, "end_ns": 2, "pid": 1234, "tid": 1235}',
-                '{"version": 1, "type": "event", "start_ns": 3, "end_ns": 2, "pid": 1234, "tid": 1235}',
-                '{"version": 1, "type": "event", "start_ns": 1, "end_ns": 2, "pid": 99, "tid": 1235}',
+                '{"version": 2, "type": "event", "start_ns": true, "end_ns": 2, "pid": 1234, "tid": 1235, "pidns_dev": 7, "pidns_ino": 8}',
+                '{"version": 2, "type": "event", "start_ns": 3, "end_ns": 2, "pid": 1234, "tid": 1235, "pidns_dev": 7, "pidns_ino": 8}',
+                '{"version": 2, "type": "event", "start_ns": 1, "end_ns": 2, "pid": 99, "tid": 1235, "pidns_dev": 7, "pidns_ino": 8}',
             ]
         )
         + "\n"
@@ -231,13 +285,13 @@ def test_core_detector_rejects_invalid_or_mismatched_events() -> None:
 
 def test_core_detector_logs_callback_exception_and_continues(caplog) -> None:
     callback = Mock(side_effect=[RuntimeError("sink down"), None])
-    event = '"start_ns": 1, "end_ns": 2, "pid": 1234, "tid": 1235'
+    event = '"start_ns": 1, "end_ns": 2, "pid": 1234, "tid": 1235, "pidns_dev": 7, "pidns_ino": 8'
     process = _FakeProcess(
         "\n".join(
             [
                 _READY,
-                f'{{"version": 1, "type": "event", {event}}}',
-                f'{{"version": 1, "type": "event", {event}}}',
+                f'{{"version": 2, "type": "event", {event}}}',
+                f'{{"version": 2, "type": "event", {event}}}',
             ]
         )
         + "\n"
@@ -276,7 +330,7 @@ def test_core_detector_start_and_stop_are_idempotent() -> None:
 @pytest.mark.parametrize(
     ("suffix", "expected"),
     [
-        ('{"version": 1, "type": "fatal", "message": "poll failed"}\n', "poll failed"),
+        ('{"version": 2, "type": "fatal", "message": "poll failed"}\n', "poll failed"),
         ("", "exited unexpectedly after ready"),
     ],
 )
@@ -305,3 +359,27 @@ def test_core_detector_wraps_sidecar_exec_error() -> None:
         pytest.raises(CoreDetectorError, match="Could not start.*executable"),
     ):
         CoreDetector(_config(), Mock()).start()
+
+
+@pytest.mark.parametrize(
+    "record",
+    [
+        '{"version": 2, "type": "lost", "count": true, "source": "perf_buffer", "pidns_dev": 7, "pidns_ino": 8}',
+        '{"version": 2, "type": "lost", "count": -1, "source": "perf_buffer", "pidns_dev": 7, "pidns_ino": 8}',
+        '{"version": 2, "type": "lost", "count": 1, "source": "unknown", "pidns_dev": 7, "pidns_ino": 8}',
+        '{"version": 2, "type": "lost", "count": 1, "source": "perf_buffer", "pidns_dev": 7, "pidns_ino": 9}',
+    ],
+)
+def test_core_detector_treats_invalid_loss_as_protocol_error(record: str) -> None:
+    process = _FakeProcess(_READY + "\n" + record + "\n")
+    with (
+        patch("blocksnoop.core_backend.find_sidecar", return_value="/bin/sidecar"),
+        patch("blocksnoop.core_backend.subprocess.Popen", return_value=process),
+    ):
+        detector = CoreDetector(_config(), Mock())
+        detector.start()
+        assert detector._reader is not None
+        detector._reader.join(timeout=1)
+        with pytest.raises(CoreDetectorError, match="lost record"):
+            detector.check_health()
+        detector.stop()

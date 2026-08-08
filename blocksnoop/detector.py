@@ -13,7 +13,7 @@ from pathlib import Path
 from collections.abc import Callable
 from typing import Any
 
-from blocksnoop.core import BlockingEvent, DetectorConfig
+from blocksnoop.core import BlockingEvent, DetectorConfig, LostEvent
 
 _logger = logging.getLogger("blocksnoop.detector")
 
@@ -24,6 +24,10 @@ _TRACEFS_EVENTS = "/sys/kernel/debug/tracing/events/syscalls"
 
 _ARCH_SUFFIXES = ("arm64", "amd64", "cloud-amd64")
 _MACHINE_TO_KARCH = {"aarch64": "arm64", "x86_64": "x86"}
+
+
+class BccDetectorError(RuntimeError):
+    """The BCC polling backend can no longer deliver events."""
 
 
 def _ensure_kernel_headers() -> None:
@@ -303,17 +307,25 @@ class BccDetector:
         self,
         config: DetectorConfig,
         callback: Callable[[BlockingEvent], None],
+        loss_callback: Callable[[LostEvent], None] | None = None,
     ) -> None:
         self._config = config
         self._callback = callback
+        self._loss_callback = loss_callback
+        self._loss_counts: dict[str, int] = {}
+        self._loss_lock = threading.Lock()
         self._stop_event = threading.Event()
         self._thread: threading.Thread | None = None
         self._bpf: Any | None = None
+        self._poll_error: Exception | None = None
 
     def start(self) -> None:
         """Compile, attach and begin polling the BCC program."""
         if self._thread is not None:
             return
+        with self._loss_lock:
+            self._loss_counts = {}
+        self._poll_error = None
 
         bpf_source_path = os.path.join(
             os.path.dirname(__file__), "bpf", "blockdetect.c"
@@ -363,7 +375,9 @@ class BccDetector:
             from bcc import BPF  # type: ignore[import]
 
             self._bpf = BPF(text=source)
-            self._bpf["events"].open_perf_buffer(self._handle_event)
+            self._bpf["events"].open_perf_buffer(
+                self._handle_event, lost_cb=self._handle_lost
+            )
             self._stop_event.clear()
             self._thread = threading.Thread(target=self._poll_loop, daemon=True)
             self._thread.start()
@@ -383,12 +397,31 @@ class BccDetector:
         _logger.debug("eBPF polling thread stopped")
 
     def check_health(self) -> None:
-        """BCC polling errors surface through its thread; no extra probe needed."""
+        """Surface failed or unexpectedly dead BCC polling threads."""
+        if self._stop_event.is_set():
+            return
+        if self._poll_error is not None:
+            raise BccDetectorError(
+                f"BCC perf buffer polling failed: {self._poll_error}"
+            )
+        if self._thread is not None and not self._thread.is_alive():
+            raise BccDetectorError("BCC perf buffer polling thread exited unexpectedly")
+
+    @property
+    def loss_counts(self) -> dict[str, int]:
+        """Dropped perf-buffer events grouped by source."""
+        with self._loss_lock:
+            return dict(self._loss_counts)
 
     def _poll_loop(self) -> None:
         assert self._bpf is not None
-        while not self._stop_event.is_set():
-            self._bpf.perf_buffer_poll(timeout=100)
+        try:
+            while not self._stop_event.is_set():
+                self._bpf.perf_buffer_poll(timeout=100)
+        except Exception as exc:
+            if not self._stop_event.is_set():
+                self._poll_error = exc
+                _logger.exception("BCC perf buffer polling failed")
 
     def _handle_event(self, cpu: int, data: ctypes.c_void_p, size: int) -> None:
         event = ctypes.cast(data, ctypes.POINTER(_BpfEvent)).contents
@@ -405,6 +438,20 @@ class BccDetector:
             blocking_event.duration_ms,
         )
         self._callback(blocking_event)
+
+    def _handle_lost(self, cpu: int, count: int) -> None:
+        """Record BCC perf-buffer loss without interrupting collection."""
+        if count <= 0:
+            return
+        source = "perf_buffer"
+        with self._loss_lock:
+            self._loss_counts[source] = self._loss_counts.get(source, 0) + count
+        event = LostEvent(count=count, source=source)
+        if self._loss_callback is not None:
+            try:
+                self._loss_callback(event)
+            except Exception:
+                _logger.exception("Detector loss callback failed")
 
 
 # Compatibility alias for integrations that imported the old backend-specific

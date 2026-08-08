@@ -44,31 +44,27 @@ TARGET_SCRIPT = (
     "asyncio.run(main())\n"
 )
 
-# docker-compose.yml explicitly pins this tag so Compose builds from a
-# worktree (whose directory name becomes the project name) remain reproducible.
-# Allow override via env for ad-hoc runs against a different tag (e.g. when
-# testing a custom-built `blocksnoop:patched-nspid`).
-BLOCKSNOOP_IMAGE_TAG = os.environ.get(
-    "BLOCKSNOOP_TEST_IMAGE", "blocksnoop-blocksnoop:latest"
-)
-
 THRESHOLD_MS = 100
 BLOCKSNOOP_TIMEOUT_S = 10
 SETTLE_DELAY_S = 2
 
 
-def test_blocksnoop_attaches_across_pid_namespaces(docker_image, docker_client):
+@pytest.mark.parametrize("backend", ["bcc", "core"])
+def test_blocksnoop_attaches_across_pid_namespaces(
+    docker_image, docker_client, backend: str
+):
     """blocksnoop in host PID ns + target in private PID ns → Austin samples.
 
     Regression test for two bugs that broke this exact topology:
       1. nsenter without ``-p`` → /proc/self/fd unresolvable inside target.
       2. host PID passed to Austin → "Cannot attach to the given process".
     """
-    image = docker_client.images.get(BLOCKSNOOP_IMAGE_TAG)
-    assert BLOCKSNOOP_IMAGE_TAG in image.tags, (
-        "docker-compose must tag the locally built image consistently, even "
-        "when the checkout is a worktree"
-    )
+    image = docker_client.images.get(docker_image)
+    if not os.environ.get("BLOCKSNOOP_TEST_IMAGE"):
+        assert docker_image in image.tags, (
+            "docker-compose must tag the locally built image consistently, even "
+            "when the checkout is a worktree"
+        )
 
     target = docker_client.containers.run(
         TARGET_IMAGE,
@@ -84,17 +80,27 @@ def test_blocksnoop_attaches_across_pid_namespaces(docker_image, docker_client):
 
         host_pid = docker_client.api.inspect_container(target.id)["State"]["Pid"]
         assert host_pid > 0, "target container has no host PID"
+        assert host_pid != 1, "target unexpectedly shares the collector PID namespace"
+
+        exit_code, status = target.exec_run(["cat", "/proc/1/status"])
+        assert exit_code == 0, status.decode()
+        nspid_line = next(
+            line for line in status.decode().splitlines() if line.startswith("NSpid:")
+        )
+        target_ns_pid = int(nspid_line.split()[-1])
 
         # blocksnoop in HOST PID namespace — same topology as a K8s Job with
         # hostPID: true targeting a worker pod that has its own PID ns. Run
         # detached so we can collect logs even when `timeout` exits with 124
         # (the expected outcome — Austin runs until the test window closes).
         snoop = docker_client.containers.run(
-            BLOCKSNOOP_IMAGE_TAG,
+            docker_image,
             command=[
                 "timeout",
                 str(BLOCKSNOOP_TIMEOUT_S),
                 "blocksnoop",
+                "--backend",
+                backend,
                 "-t",
                 str(THRESHOLD_MS),
                 "--json",
@@ -138,6 +144,9 @@ def test_blocksnoop_attaches_across_pid_namespaces(docker_image, docker_client):
         "Austin couldn't attach — host PID likely passed instead of "
         "container-local NSpid:\n" + text
     )
+    assert "Core backend unavailable" not in text, text
+    assert "Core sidecar error" not in text, text
+    assert '"type":"fatal"' not in text, text
 
     # Parse JSON events; at least one with a python_stacks payload proves
     # Austin both attached AND read Python frames across the namespace gap.
@@ -154,3 +163,9 @@ def test_blocksnoop_attaches_across_pid_namespaces(docker_image, docker_client):
             events.append(ev)
 
     assert events, f"no Austin samples with python_stacks emitted; raw output:\n{text}"
+    assert all(event["duration_ms"] >= THRESHOLD_MS for event in events)
+
+    if backend == "core":
+        assert all(event["pid"] == target_ns_pid for event in events), text
+        assert all(event["tid"] == target_ns_pid for event in events), text
+        assert all(event["pid"] != host_pid for event in events), text

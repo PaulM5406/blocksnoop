@@ -5,7 +5,7 @@ from __future__ import annotations
 import linecache
 import logging
 import time
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 
 from blocksnoop.core import BlockingEvent
 from blocksnoop.sinks import ConsoleSink, Sink
@@ -65,11 +65,16 @@ class Reporter:
     def event_count(self) -> int:
         return self._event_count
 
-    def summary(self, duration_s: float) -> None:
+    def summary(
+        self, duration_s: float, *, loss_counts: Mapping[str, int] | None = None
+    ) -> None:
         """Build a summary dict and emit to all sinks."""
+        losses = dict(loss_counts or {})
         summary = {
             "duration_s": duration_s,
             "event_count": self._event_count,
+            "lost_event_count": sum(losses.values()),
+            "lost_events_by_source": losses,
         }
         for sink in self._sinks:
             sink.emit_summary(summary)

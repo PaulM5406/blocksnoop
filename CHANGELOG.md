@@ -1,5 +1,22 @@
 # Changelog
 
+## [v0.9.0] - 2026-08-08
+
+### Added
+
+- `blocksnoop doctor [PID]` reports backend readiness without attaching BPF or spawning the native collector. Text and JSON output cover BTF, tracepoints, effective capabilities, sidecar/object availability, BCC, and target PID-namespace identity.
+- Both detector backends expose lost-event counters. Core validates per-source deltas from the sidecar and drains records already in flight during shutdown.
+
+### Changed
+
+- The Core sidecar protocol is now v2. Python resolves the target namespace device/inode and namespace-local PID/TID before spawn; eBPF filters with `bpf_get_ns_current_pid_tgid`, bringing Core parity to hostPID collectors monitoring processes in private container PID namespaces.
+- Release publication is ordered and verified from the registries: exact PyPI hashes/install, Docker revision/digest, amd64+arm64 manifest, live Core workload, and a remote-image private-PID-namespace test.
+
+### Known limitations
+
+- Core remains explicit with `--backend core`; BCC is still the default compatibility backend.
+- The portable PyPI wheel does not yet bundle a native sidecar. The official Docker image contains the amd64/arm64 collector and BPF object.
+
 ## [v0.8.0] - 2026-08-08
 
 ### Added

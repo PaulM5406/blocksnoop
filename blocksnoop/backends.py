@@ -5,7 +5,7 @@ from __future__ import annotations
 from collections.abc import Callable
 from typing import Literal
 
-from blocksnoop.core import BlockingEvent, Detector, DetectorConfig
+from blocksnoop.core import BlockingEvent, Detector, DetectorConfig, LostEvent
 
 Backend = Literal["bcc", "core"]
 
@@ -38,14 +38,19 @@ def create_detector(
     *,
     config: DetectorConfig,
     callback: Callable[[BlockingEvent], None],
+    loss_callback: Callable[[LostEvent], None] | None = None,
 ) -> Detector:
     """Create exactly the requested detector backend; never silently fall back."""
     if backend == "bcc":
         from blocksnoop.detector import BccDetector
 
-        return BccDetector(config=config, callback=callback)
+        return BccDetector(
+            config=config, callback=callback, loss_callback=loss_callback
+        )
     if backend == "core":
         from blocksnoop.core_backend import CoreDetector
 
-        return CoreDetector(config=config, callback=callback)
+        return CoreDetector(
+            config=config, callback=callback, loss_callback=loss_callback
+        )
     raise ValueError(f"Unsupported detector backend: {backend}")
