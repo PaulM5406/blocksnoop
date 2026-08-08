@@ -1,5 +1,11 @@
 # Changelog
 
+## [v0.9.1] - 2026-08-08
+
+### Fixed
+
+- Release smoke checks now wait until the exact PyPI package is installable through the Simple Index, rather than relying only on the JSON API. The diagnostics check preserves its JSON report in a file and validates it with the installed package environment, while source-distribution inspection no longer uses a pipe that can fail spuriously.
+
 ## [v0.9.0] - 2026-08-08
 
 ### Added
