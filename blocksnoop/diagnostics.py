@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import errno
 import importlib.util
 import os
 import re
@@ -18,6 +19,13 @@ _TRACEFS_ROOTS = (
     Path("/sys/kernel/tracing/events/syscalls"),
     Path("/sys/kernel/debug/tracing/events/syscalls"),
 )
+_EXPECTED_FILESYSTEM_ERRORS = {
+    errno.EACCES,
+    errno.EPERM,
+    errno.ENOENT,
+    errno.ENOTDIR,
+    errno.ESTALE,
+}
 
 
 @dataclass(frozen=True)
@@ -122,30 +130,39 @@ def render_diagnostics(report: DoctorReport, *, verbose: bool = False) -> str:
 def _check_path(
     name: str, path: Path, success: str, remediation: str, required: bool
 ) -> DiagnosticCheck:
-    if path.is_file() and os.access(path, os.R_OK):
+    if _is_readable_file(path):
         return DiagnosticCheck(name, "pass", success)
     return DiagnosticCheck(
         name, "fail" if required else "warn", f"not readable: {path}", remediation
     )
 
 
+def _is_readable_file(path: Path) -> bool:
+    try:
+        return path.is_file() and os.access(path, os.R_OK)
+    except OSError as error:
+        if error.errno in _EXPECTED_FILESYSTEM_ERRORS:
+            return False
+        raise
+
+
 def _check_tracepoints() -> DiagnosticCheck:
-    pairs = [
-        syscall
-        for root in _TRACEFS_ROOTS
-        for syscall in _EPOLL_SYSCALLS
-        if (root / f"sys_enter_{syscall}" / "format").is_file()
-        and (root / f"sys_exit_{syscall}" / "format").is_file()
-    ]
-    if pairs:
-        return DiagnosticCheck(
-            "tracepoints", "pass", f"epoll pairs available: {', '.join(pairs)}"
-        )
+    for root in _TRACEFS_ROOTS:
+        pairs: list[str] = []
+        for syscall in _EPOLL_SYSCALLS:
+            entered = root / f"sys_enter_{syscall}" / "format"
+            exited = root / f"sys_exit_{syscall}" / "format"
+            if _is_readable_file(entered) and _is_readable_file(exited):
+                pairs.append(syscall)
+        if pairs:
+            return DiagnosticCheck(
+                "tracepoints", "pass", f"epoll pairs available: {', '.join(pairs)}"
+            )
     return DiagnosticCheck(
         "tracepoints",
         "fail",
         "no readable complete epoll tracepoint pair",
-        "Mount tracefs and enable epoll syscall tracepoints.",
+        "Mount tracefs and grant read access to epoll syscall tracepoints.",
     )
 
 
@@ -220,7 +237,7 @@ def _check_bpf_object(sidecar: str | None, backend: Backend) -> DiagnosticCheck:
     configured = os.environ.get("BLOCKSNOOP_BPF_OBJECT")
     candidates = [Path(configured)] if configured else _bpf_object_candidates(sidecar)
     for candidate in candidates:
-        if candidate.is_file() and os.access(candidate, os.R_OK):
+        if _is_readable_file(candidate):
             return DiagnosticCheck("bpf_object", "pass", f"resolved: {candidate}")
     detail = (
         "no object path could be proven"
