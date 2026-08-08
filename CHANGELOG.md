@@ -1,5 +1,22 @@
 # Changelog
 
+## [v0.8.0] - 2026-08-08
+
+### Added
+
+- Experimental `--backend core` support backed by a small libbpf sidecar and a precompiled, BTF-enabled eBPF object. The official Docker image builds the native collector for both amd64 and arm64.
+- A versioned NDJSON protocol between Python and `blocksnoop-ebpf`, including explicit readiness, blocking events, lost-event notifications, and fatal startup errors.
+
+### Changed
+
+- Detector selection now goes through a shared backend protocol and factory. BCC remains the default and compatibility backend; selecting Core is explicit and never falls back silently.
+- BCC compilation and attachment are deferred until detector startup, so the Core path neither imports nor requires BCC.
+
+### Known limitations
+
+- The first Core backend supports targets in the same PID namespace as blocksnoop. Cross-PID-namespace translation remains on the BCC backend until the next migration stage.
+- PyPI continues to ship the portable Python and BPF sources, but not a platform-specific native sidecar yet. Use the official Docker image or build `native/blocksnoop-ebpf` on Linux to try `--backend core`.
+
 ## [v0.7.3] - 2026-08-08
 
 ### Fixed

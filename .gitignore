@@ -28,3 +28,7 @@ Thumbs.db
 .coverage
 htmlcov/
 .tox/
+
+# Native build outputs
+blocksnoop/bpf/*.bpf.o
+native/blocksnoop-ebpf

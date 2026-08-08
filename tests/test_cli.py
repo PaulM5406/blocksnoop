@@ -1,7 +1,7 @@
 """Unit tests for CLI argument parsing, validation, and sink assembly."""
 
 import logging
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 import pytest
 
@@ -9,9 +9,11 @@ from blocksnoop.cli import (
     _build_sinks,
     _parse_args,
     _resolve_target,
+    _run_loop,
     _validate_environment,
     main,
 )
+from blocksnoop.core_backend import CoreDetectorError
 from blocksnoop.sinks import ConsoleSink, JsonFileSink, JsonStreamSink
 
 
@@ -37,6 +39,7 @@ def test_parse_args_defaults():
     assert args.target == "1234"
     assert args.threshold is None
     assert args.stats is False
+    assert args.backend == "bcc"
     assert args.tid is None
     assert args.json_mode is False
     assert args.log_file is None
@@ -55,6 +58,8 @@ def test_parse_args_all_flags():
             "50",
             "--tid",
             "999",
+            "--backend",
+            "core",
             "--json",
             "--log-file",
             "/tmp/out.json",
@@ -73,6 +78,7 @@ def test_parse_args_all_flags():
     )
     assert args.threshold == 50
     assert args.tid == 999
+    assert args.backend == "core"
     assert args.json_mode is True
     assert args.log_file == "/tmp/out.json"
     assert args.service == "my-api"
@@ -127,6 +133,56 @@ def test_resolve_target_non_numeric_becomes_command():
     assert command == ["python", "app.py"]
 
 
+def test_run_loop_rolls_back_partial_start() -> None:
+    start = Mock(side_effect=RuntimeError("attach failed"))
+    stop = Mock()
+    check_health = Mock()
+    on_exit = Mock()
+
+    with pytest.raises(RuntimeError, match="attach failed"):
+        _run_loop(start, stop, check_health, on_exit, child_process=None)
+
+    stop.assert_called_once_with()
+    check_health.assert_not_called()
+    on_exit.assert_called_once_with()
+
+
+def test_run_loop_reaps_child_when_start_fails() -> None:
+    child = Mock()
+    child.poll.return_value = None
+    start = Mock(side_effect=RuntimeError("attach failed"))
+
+    with pytest.raises(RuntimeError, match="attach failed"):
+        _run_loop(start, Mock(), Mock(), Mock(), child)
+
+    child.terminate.assert_called_once_with()
+    child.wait.assert_called_once_with(timeout=5)
+
+
+def test_run_loop_checks_health_and_reaps_running_child() -> None:
+    child = Mock()
+    child.poll.return_value = None
+    health_error = RuntimeError("sidecar stopped")
+    check_health = Mock(side_effect=health_error)
+
+    with pytest.raises(RuntimeError, match="sidecar stopped"):
+        _run_loop(Mock(), Mock(), check_health, Mock(), child)
+
+    check_health.assert_called_once_with()
+    child.terminate.assert_called_once_with()
+    child.wait.assert_called_once_with(timeout=5)
+
+
+def test_run_loop_checks_health_in_pid_mode() -> None:
+    health_error = RuntimeError("detector stopped")
+    check_health = Mock(side_effect=health_error)
+
+    with pytest.raises(RuntimeError, match="detector stopped"):
+        _run_loop(Mock(), Mock(), check_health, Mock(), None)
+
+    check_health.assert_called_once_with()
+
+
 # ---------------------------------------------------------------------------
 # _validate_environment
 # ---------------------------------------------------------------------------
@@ -157,6 +213,16 @@ def test_validate_stats_mode_skips_austin():
     ):
         # Should NOT raise — stats mode skips the Austin check
         _validate_environment(stats_mode=True)
+
+
+def test_validate_core_backend_does_not_require_bcc(capsys):
+    with (
+        patch("blocksnoop.cli.check_austin_available", return_value=True),
+        patch("blocksnoop.cli.validate_backend_available") as validate_backend,
+    ):
+        _validate_environment(backend="core")
+    validate_backend.assert_called_once_with("core")
+    assert capsys.readouterr().err == ""
 
 
 def test_validate_missing_bcc_error(capsys):
@@ -218,20 +284,37 @@ def test_verbose_sets_debug_level():
     with (
         patch("blocksnoop.cli.check_austin_available", return_value=True),
         patch("blocksnoop.cli._validate_environment"),
-        patch("blocksnoop.cli.EbpfDetector"),
+        patch("blocksnoop.cli.create_detector"),
         patch("blocksnoop.cli.AustinSampler"),
         patch("subprocess.Popen") as mock_popen,
         patch("sys.argv", ["blocksnoop", "-v", "--", "python", "app.py"]),
         patch("blocksnoop.cli.logging.basicConfig") as mock_basic_config,
     ):
         mock_popen.return_value.pid = 1234
-        mock_popen.return_value.wait.side_effect = KeyboardInterrupt
+        mock_popen.return_value.poll.return_value = 0
         try:
             main()
         except SystemExit:
             pass
     mock_basic_config.assert_called_once()
     assert mock_basic_config.call_args.kwargs["level"] == logging.DEBUG
+
+
+def test_core_runtime_error_is_user_facing_without_traceback(capsys) -> None:
+    with (
+        patch("blocksnoop.cli._validate_environment"),
+        patch(
+            "blocksnoop.cli._run_normal",
+            side_effect=CoreDetectorError("sidecar crashed"),
+        ),
+        patch("sys.argv", ["blocksnoop", "--backend", "core", "1234"]),
+        pytest.raises(SystemExit, match="1"),
+    ):
+        main()
+
+    stderr = capsys.readouterr().err
+    assert "Core backend unavailable: sidecar crashed" in stderr
+    assert "Traceback" not in stderr
 
 
 # ---------------------------------------------------------------------------

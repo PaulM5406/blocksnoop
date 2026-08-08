@@ -27,7 +27,8 @@ eBPF (kernel)          Austin (userspace)
 
 - Linux with eBPF support (kernel 4.15+)
 - Root privileges (for eBPF and Austin)
-- [BCC (BPF Compiler Collection)](https://github.com/iovisor/bcc)
+- [BCC (BPF Compiler Collection)](https://github.com/iovisor/bcc) when using the default `--backend bcc`
+- `blocksnoop-ebpf` sidecar when using `--backend core`
 - [Austin](https://github.com/P403n1x87/austin)
 - [austin-python](https://github.com/P403n1x87/austin-python) (installed automatically as a dependency)
 - Python 3.12+
@@ -45,6 +46,22 @@ git clone git@github.com:PaulM5406/blocksnoop.git
 cd blocksnoop
 uv sync --all-extras --dev
 ```
+
+### eBPF backends
+
+`--backend bcc` remains the default and supports the existing namespace-aware
+deployment paths. `--backend core` is the first experimental compile-once
+backend: Python launches the small `blocksnoop-ebpf` libbpf sidecar and consumes
+its versioned NDJSON event stream. The current tracepoint-only program does not
+read kernel structures, so the precompiled object has no kernel-layout
+relocations despite carrying BTF metadata.
+
+The official Docker image contains the native sidecar. A source checkout or
+unpacked source distribution can build it on Linux with `make -C native` and
+place `native/blocksnoop-ebpf` on `PATH`. The portable PyPI wheel does not yet
+contain a platform-specific sidecar; in that installation the CLI reports the
+missing capability and suggests `--backend bcc`. Core v0.8 targets processes in
+the same PID namespace as blocksnoop and never silently falls back to BCC.
 
 ## Usage
 
@@ -148,6 +165,7 @@ Options:
   -t, --threshold FLOAT        Blocking threshold in ms (default: 100, or 0 with --stats)
   --stats                      eBPF-only mode: show epoll gap distribution (no Austin/stacks)
   --tid INT                    Thread ID to monitor (default: main thread)
+  --backend {bcc,core}         eBPF backend to use (default: bcc)
   --json                       JSON lines output to stdout
   --log-file PATH              Write structured JSON to file for log aggregators
   --service NAME               Service name for structured logs (default: blocksnoop)
@@ -168,6 +186,9 @@ docker pull oloapm/blocksnoop
 
 # Attach to a process on the host
 docker run --rm --privileged --pid=host oloapm/blocksnoop blocksnoop -t 100 <PID>
+
+# Use the precompiled libbpf backend explicitly
+docker run --rm --privileged --pid=host oloapm/blocksnoop blocksnoop --backend core -t 100 <PID>
 
 # Launch and monitor a process
 docker run --rm --privileged --pid=host oloapm/blocksnoop blocksnoop -t 100 -- python app.py

@@ -26,6 +26,28 @@ jobs:
       - run: uv sync --all-extras --dev
       - run: uv run ty check blocksnoop/
 
+  native:
+    name: Build Core sidecar
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: sudo apt-get update
+      - run: sudo apt-get install -y build-essential clang libbpf-dev libelf-dev pkg-config zlib1g-dev
+      - run: make -C native
+      - run: make -C native test
+      - run: readelf -S blocksnoop/bpf/core_blockdetect.bpf.o | grep -E '\.BTF(\.ext)?'
+
+  core-integration:
+    name: Core backend Docker integration
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+      - run: uv sync --all-extras --dev
+      - run: docker info
+      - run: docker compose build
+      - run: uv run pytest tests/integration/test_core_backend.py -v
+
   tests:
     name: "Python ${{ matrix.python-version }}"
     runs-on: ubuntu-latest
@@ -47,10 +69,11 @@ jobs:
       - uses: astral-sh/setup-uv@v5
       - run: uv build
       - run: tar -tf dist/*.tar.gz | grep -E '/blocksnoop/bpf/blockdetect\.c$'
+      - run: tar -tf dist/*.tar.gz | grep -E '/native/blocksnoop_ebpf\.c$'
       - name: Install the wheel in a clean environment outside the checkout
         run: |
           uv venv --python 3.12 /tmp/blocksnoop-wheel-test
           uv pip install --python /tmp/blocksnoop-wheel-test/bin/python "$GITHUB_WORKSPACE"/dist/*.whl
           cd /tmp
-          /tmp/blocksnoop-wheel-test/bin/python -c 'from importlib.resources import files; assert files("blocksnoop").joinpath("bpf/blockdetect.c").is_file()'
+          /tmp/blocksnoop-wheel-test/bin/python -c 'from importlib.resources import files; root = files("blocksnoop"); assert root.joinpath("bpf/blockdetect.c").is_file(); assert root.joinpath("bpf/core_blockdetect.bpf.c").is_file(); assert root.joinpath("bpf/core_types.h").is_file()'
           /tmp/blocksnoop-wheel-test/bin/blocksnoop --help

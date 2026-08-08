@@ -11,9 +11,10 @@ import sys
 import time
 import typing
 
+from blocksnoop.backends import Backend, create_detector, validate_backend_available
 from blocksnoop.core import DetectorConfig
+from blocksnoop.core_backend import CoreDetectorError
 from blocksnoop.correlator import Correlator
-from blocksnoop.detector import EbpfDetector
 from blocksnoop.profiler import (
     AustinSampler,
     check_austin_available,
@@ -55,6 +56,12 @@ def _parse_args(
         type=int,
         default=None,
         help="Thread ID to monitor (default: main thread)",
+    )
+    parser.add_argument(
+        "--backend",
+        choices=("bcc", "core"),
+        default="bcc",
+        help="eBPF backend to use (default: bcc)",
     )
     parser.add_argument(
         "--json", dest="json_mode", action="store_true", help="JSON lines output"
@@ -118,7 +125,9 @@ def _resolve_target(args: argparse.Namespace) -> tuple[int | None, list[str]]:
     return target_pid, command
 
 
-def _validate_environment(*, stats_mode: bool = False) -> None:
+def _validate_environment(
+    *, stats_mode: bool = False, backend: Backend = "bcc"
+) -> None:
     """Check runtime prerequisites; exits on failure."""
     if os.geteuid() != 0:
         print("error: blocksnoop must be run as root (sudo)", file=sys.stderr)
@@ -133,13 +142,9 @@ def _validate_environment(*, stats_mode: bool = False) -> None:
         sys.exit(1)
 
     try:
-        import bcc  # noqa: F401  # type: ignore[unresolved-import]
-    except ImportError:
-        print(
-            "error: bcc (BPF Compiler Collection) is not installed.\n"
-            "  Install: https://github.com/iovisor/bcc/blob/master/INSTALL.md",
-            file=sys.stderr,
-        )
+        validate_backend_available(backend)
+    except RuntimeError as exc:
+        print(f"error: {exc}", file=sys.stderr)
         sys.exit(1)
 
 
@@ -173,33 +178,72 @@ def _build_sinks(args: argparse.Namespace) -> list[Sink]:
 def _run_loop(
     start: typing.Callable[[], None],
     stop: typing.Callable[[], None],
+    check_health: typing.Callable[[], None],
     on_exit: typing.Callable[[], None],
     child_process: subprocess.Popen | None,
 ) -> None:
     """Signal/wait loop shared by normal and stats paths."""
-    start()
+    cleaned_up = False
+
+    def _cleanup() -> None:
+        nonlocal cleaned_up
+        if cleaned_up:
+            return
+        cleaned_up = True
+        try:
+            stop()
+        finally:
+            try:
+                on_exit()
+            finally:
+                _stop_child(child_process)
+
+    try:
+        start()
+    except Exception:
+        _cleanup()
+        raise
 
     def _shutdown(signum: int, frame: object) -> None:
-        stop()
-        on_exit()
-        if child_process is not None:
-            child_process.terminate()
+        _cleanup()
         sys.exit(0)
 
     signal.signal(signal.SIGINT, _shutdown)
     signal.signal(signal.SIGTERM, _shutdown)
 
-    if child_process is not None:
-        try:
+    try:
+        if child_process is not None:
+            while child_process.poll() is None:
+                check_health()
+                time.sleep(0.1)
             child_process.wait()
-        except KeyboardInterrupt:
-            pass
-        stop()
-        on_exit()
-        child_process.terminate()
+        else:
+            while True:
+                check_health()
+                time.sleep(1)
+    except KeyboardInterrupt:
+        _cleanup()
+    except Exception:
+        _cleanup()
+        raise
     else:
-        while True:
-            time.sleep(1)
+        _cleanup()
+
+
+def _stop_child(child_process: subprocess.Popen | None) -> None:
+    """Terminate and reap a launched target without masking pipeline cleanup."""
+    if child_process is None:
+        return
+    try:
+        if child_process.poll() is None:
+            child_process.terminate()
+        child_process.wait(timeout=5)
+    except (OSError, subprocess.TimeoutExpired):
+        try:
+            child_process.kill()
+            child_process.wait(timeout=5)
+        except (OSError, subprocess.TimeoutExpired):
+            pass
 
 
 def main() -> None:
@@ -217,7 +261,10 @@ def main() -> None:
 
     target_pid, command = _resolve_target(args)
 
-    _validate_environment(stats_mode=args.stats)
+    _validate_environment(stats_mode=args.stats, backend=args.backend)
+    _logger.debug(
+        "Detector backend requested=%s effective=%s", args.backend, args.backend
+    )
 
     # Validation: must have either a PID or a command
     if target_pid is None and not command:
@@ -239,10 +286,14 @@ def main() -> None:
         assert target_pid is not None  # guaranteed by validation above
         pid = target_pid
 
-    if args.stats:
-        _run_stats(args, pid, child_process)
-    else:
-        _run_normal(args, pid, child_process)
+    try:
+        if args.stats:
+            _run_stats(args, pid, child_process)
+        else:
+            _run_normal(args, pid, child_process)
+    except CoreDetectorError as exc:
+        print(f"error: Core backend unavailable: {exc}", file=sys.stderr)
+        sys.exit(1)
 
 
 def _run_stats(
@@ -257,7 +308,7 @@ def _run_stats(
         tid=args.tid,
     )
     collector = StatsCollector(pid=pid, json_mode=args.json_mode)
-    detector = EbpfDetector(config=config, callback=collector.on_event)
+    detector = create_detector(args.backend, config=config, callback=collector.on_event)
 
     _logger.debug(
         "Stats mode: pid=%d, tid=%d, threshold=%.0fms",
@@ -274,7 +325,13 @@ def _run_stats(
         detector.stop()
         collector.stop()
 
-    _run_loop(_start, _stop, on_exit=lambda: None, child_process=child_process)
+    _run_loop(
+        _start,
+        _stop,
+        detector.check_health,
+        on_exit=lambda: None,
+        child_process=child_process,
+    )
 
 
 def _run_normal(
@@ -299,7 +356,9 @@ def _run_normal(
         reporter_callback=reporter.report,
         correlation_padding_ns=int(config.correlation_padding_ms * 1_000_000),
     )
-    detector = EbpfDetector(config=config, callback=correlator.on_event)
+    detector = create_detector(
+        args.backend, config=config, callback=correlator.on_event
+    )
 
     _logger.debug(
         "Pipeline ready: pid=%d, tid=%d, threshold=%.0fms, "
@@ -325,7 +384,7 @@ def _run_normal(
         reporter.summary(time.monotonic() - start_time)
         reporter.close()
 
-    _run_loop(_start, _stop, _on_exit, child_process)
+    _run_loop(_start, _stop, detector.check_health, _on_exit, child_process)
 
 
 if __name__ == "__main__":
