@@ -357,6 +357,8 @@ jobs:
       - uses: actions/checkout@v4
       - uses: astral-sh/setup-uv@v5
       - uses: docker/setup-buildx-action@v3
+      - name: Install integration test tooling
+        run: uv sync --locked --all-extras --dev
       - name: Wait for exact multi-arch image
         env:
           VERSION: ${{ github.ref_name }}
@@ -402,7 +404,6 @@ jobs:
             | python -c 'import json,sys; events=[item for line in sys.stdin if (item := json.loads(line)) and "duration_ms" in item]; assert events; assert all(item["duration_ms"] >= 100 for item in events); print(f"published Core events: {len(events)}")'
       - name: Detect same and private PID namespaces with Core
         run: |
-          uv sync --all-extras --dev
           BLOCKSNOOP_TEST_IMAGE="$PUBLISHED_IMAGE" uv run pytest \
             tests/integration/test_core_backend.py \
             tests/integration/test_cross_pid_namespace.py -v -k core
