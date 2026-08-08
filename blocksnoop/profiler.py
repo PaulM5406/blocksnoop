@@ -6,8 +6,9 @@ import bisect
 import glob
 import logging
 import os
+import shlex
 import shutil
-import stat
+import tempfile
 import threading
 import time
 from pathlib import Path
@@ -96,20 +97,29 @@ def _create_nsenter_wrapper(pid: int) -> str:
         raise RuntimeError("Austin binary not found")
 
     musl_linker = _find_musl_linker()
-    lines = ["#!/bin/sh", f"exec 3<{austin_path}"]
+    lines = ["#!/bin/sh", f"exec 3<{shlex.quote(austin_path)}"]
     if musl_linker is not None:
-        lines.append(f"exec 4<{musl_linker}")
+        lines.append(f"exec 4<{shlex.quote(musl_linker)}")
         # Invoke austin via the musl linker so we don't depend on the target
         # having a compatible libc/linker installed.
         austin_invocation = "/proc/self/fd/4 /proc/self/fd/3"
     else:
         austin_invocation = "/proc/self/fd/3"
-    lines.append(f'exec nsenter -m -p -t {pid} -- {austin_invocation} "$@"')
+    lines.append(
+        f'exec nsenter -m -p -t {shlex.quote(str(pid))} -- {austin_invocation} "$@"'
+    )
 
-    wrapper = f"/tmp/.austin-nsenter-{pid}"
-    with open(wrapper, "w") as f:
-        f.write("\n".join(lines) + "\n")
-    os.chmod(wrapper, stat.S_IRWXU | stat.S_IRGRP | stat.S_IXGRP)
+    fd, wrapper = tempfile.mkstemp(prefix=".austin-nsenter-", text=True)
+    try:
+        with os.fdopen(fd, "w") as f:
+            f.write("\n".join(lines) + "\n")
+        os.chmod(wrapper, 0o700)
+    except Exception:
+        try:
+            os.unlink(wrapper)
+        except OSError:
+            pass
+        raise
     return wrapper
 
 
@@ -328,22 +338,37 @@ class AustinSampler:
                 austin_pid,
                 austin_tid,
             )
-        self._austin = _LoopspyAustin(self.ring_buffer, austin_tid)
-        if nsenter_wrapper is not None:
-            # Override austin-python's binary_path (a cached_property) so it
-            # uses our nsenter wrapper instead of the bare austin binary.
-            self._austin.__dict__["binary_path"] = Path(nsenter_wrapper)
-        self._austin.start(
-            [
-                "-i",
-                str(self._interval_us),
-                "-p",
-                str(austin_pid),
-            ]
-        )
+        try:
+            self._austin = _LoopspyAustin(self.ring_buffer, austin_tid)
+            if nsenter_wrapper is not None:
+                # Override austin-python's binary_path (a cached_property) so it
+                # uses our nsenter wrapper instead of the bare austin binary.
+                self._austin.__dict__["binary_path"] = Path(nsenter_wrapper)
+            self._austin.start(
+                [
+                    "-i",
+                    str(self._interval_us),
+                    "-p",
+                    str(austin_pid),
+                ]
+            )
+        except Exception:
+            self._austin = None
+            self._cleanup_nsenter_wrapper()
+            raise
         self._health_timer = threading.Timer(3.0, self._check_health)
         self._health_timer.daemon = True
         self._health_timer.start()
+
+    def _cleanup_nsenter_wrapper(self) -> None:
+        """Remove the temporary cross-namespace wrapper, if one was created."""
+        if self._nsenter_wrapper is None:
+            return
+        try:
+            os.unlink(self._nsenter_wrapper)
+        except OSError:
+            pass
+        self._nsenter_wrapper = None
 
     def _check_health(self) -> None:
         if self._austin is not None and self._austin.sample_count == 0:
@@ -382,9 +407,4 @@ class AustinSampler:
         except Exception:
             _logger.warning("Unexpected error joining Austin thread", exc_info=True)
         self._austin = None
-        if self._nsenter_wrapper is not None:
-            try:
-                os.unlink(self._nsenter_wrapper)
-            except OSError:
-                pass
-            self._nsenter_wrapper = None
+        self._cleanup_nsenter_wrapper()

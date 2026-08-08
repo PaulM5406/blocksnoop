@@ -38,3 +38,19 @@ jobs:
       - uses: astral-sh/setup-uv@v5
       - run: uv sync --all-extras --dev --python "${{ matrix.python-version }}"
       - run: uv run pytest tests/ -v --ignore=tests/integration
+
+  package:
+    name: Build and install wheel
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+      - run: uv build
+      - run: tar -tf dist/*.tar.gz | grep -E '/blocksnoop/bpf/blockdetect\.c$'
+      - name: Install the wheel in a clean environment outside the checkout
+        run: |
+          uv venv --python 3.12 /tmp/blocksnoop-wheel-test
+          uv pip install --python /tmp/blocksnoop-wheel-test/bin/python "$GITHUB_WORKSPACE"/dist/*.whl
+          cd /tmp
+          /tmp/blocksnoop-wheel-test/bin/python -c 'from importlib.resources import files; assert files("blocksnoop").joinpath("bpf/blockdetect.c").is_file()'
+          /tmp/blocksnoop-wheel-test/bin/blocksnoop --help

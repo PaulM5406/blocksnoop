@@ -1,5 +1,13 @@
 # Changelog
 
+## [v0.7.3] - 2026-08-08
+
+### Fixed
+
+- The PyPI wheel and source distribution now include the eBPF program used at runtime, so `pip install blocksnoop` can load `blocksnoop/bpf/blockdetect.c` outside a source checkout. CI builds and installs the wheel in a clean environment to prevent regressions.
+- `--tid` now filters events in the eBPF program as well as Austin samples. Thread IDs are translated through `NSpid` for cross-PID-namespace attaches.
+- Cross-namespace Austin wrappers are created atomically with private permissions and safely quote paths before invoking the shell.
+
 ## [v0.7.2] - 2026-06-10
 
 ### Fixed

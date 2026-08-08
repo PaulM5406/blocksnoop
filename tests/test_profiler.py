@@ -2,7 +2,13 @@
 
 import logging
 import os
+import shlex
+import stat
+import tempfile
+from pathlib import Path
 from unittest.mock import patch
+
+import pytest
 
 from austin.stats import AustinFrame, AustinMetrics, AustinSample
 
@@ -338,32 +344,23 @@ def test_in_same_mount_ns_oserror():
 # ---------------------------------------------------------------------------
 
 
-def _read_wrapper(tmp_path, pid: int) -> str:
-    with open(f"/tmp/.austin-nsenter-{pid}") as f:
-        return f.read()
-
-
-def test_create_nsenter_wrapper_writes_only_to_blocksnoop_tmp(tmp_path):
+def test_create_nsenter_wrapper_writes_only_to_blocksnoop_tmp():
     """Wrapper must not write into the target's filesystem (/proc/<pid>/root/...)."""
     pid = 99001
-    opened: list[str] = []
-    real_open = open
-
-    def tracking_open(path, *args, **kwargs):
-        opened.append(str(path))
-        return real_open(path, *args, **kwargs)
-
     with (
         patch("blocksnoop.profiler.shutil.which", return_value="/fake/austin"),
         patch("blocksnoop.profiler._find_musl_linker", return_value="/fake/ld-musl.so"),
-        patch("blocksnoop.profiler.open", side_effect=tracking_open),
-        patch("blocksnoop.profiler.os.chmod"),
     ):
         wrapper = _create_nsenter_wrapper(pid)
 
-    assert wrapper == f"/tmp/.austin-nsenter-{pid}"
-    assert all(f"/proc/{pid}/root" not in p for p in opened), opened
-    os.unlink(wrapper)
+    try:
+        path = Path(wrapper)
+        assert path.parent == Path(tempfile.gettempdir())
+        assert path.name.startswith(".austin-nsenter-")
+        assert path.name != f".austin-nsenter-{pid}"
+        assert stat.S_IMODE(path.stat().st_mode) == 0o700
+    finally:
+        os.unlink(wrapper)
 
 
 def test_create_nsenter_wrapper_includes_fd_redirects():
@@ -414,6 +411,23 @@ def test_create_nsenter_wrapper_without_musl_linker():
         os.unlink(wrapper)
 
 
+def test_create_nsenter_wrapper_quotes_shell_paths():
+    """Paths are shell-quoted before the wrapper interpolates them."""
+    austin_path = "/opt/austin; touch /tmp/pwned"
+    linker_path = "/opt/ld musl.so"
+    with (
+        patch("blocksnoop.profiler.shutil.which", return_value=austin_path),
+        patch("blocksnoop.profiler._find_musl_linker", return_value=linker_path),
+    ):
+        wrapper = _create_nsenter_wrapper(99006)
+    try:
+        script = Path(wrapper).read_text()
+        assert f"exec 3<{shlex.quote(austin_path)}" in script
+        assert f"exec 4<{shlex.quote(linker_path)}" in script
+    finally:
+        os.unlink(wrapper)
+
+
 def test_create_nsenter_wrapper_raises_when_austin_missing():
     """RuntimeError when austin is not on PATH."""
     with patch("blocksnoop.profiler.shutil.which", return_value=None):
@@ -449,6 +463,28 @@ def test_austin_sampler_stop_cleans_up_wrapper_only():
         sampler.stop()
 
     assert unlinked == [f"/tmp/.austin-nsenter-{pid}"]
+
+
+def test_austin_sampler_start_cleans_up_wrapper_when_austin_fails():
+    """A failed Austin start must not leave a privileged wrapper in /tmp."""
+    pid = 99006
+    wrapper = "/tmp/.austin-nsenter-random"
+    unlinked: list[str] = []
+
+    with (
+        patch("blocksnoop.profiler._in_same_mount_ns", return_value=False),
+        patch("blocksnoop.profiler._create_nsenter_wrapper", return_value=wrapper),
+        patch("blocksnoop.profiler._resolve_ns_pid", return_value=pid),
+        patch.object(_LoopspyAustin, "start", side_effect=RuntimeError("boom")),
+        patch("blocksnoop.profiler.os.unlink", side_effect=unlinked.append),
+    ):
+        sampler = AustinSampler(pid=pid, sample_interval_ms=33, tid=pid)
+        with pytest.raises(RuntimeError, match="boom"):
+            sampler.start()
+
+    assert sampler._austin is None
+    assert sampler._nsenter_wrapper is None
+    assert unlinked == [wrapper]
 
 
 # ---------------------------------------------------------------------------

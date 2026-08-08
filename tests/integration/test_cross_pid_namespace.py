@@ -44,8 +44,8 @@ TARGET_SCRIPT = (
     "asyncio.run(main())\n"
 )
 
-# docker-compose tags the locally built image as <project>-<service>:latest.
-# Both project and service default to "blocksnoop" → "blocksnoop-blocksnoop".
+# docker-compose.yml explicitly pins this tag so Compose builds from a
+# worktree (whose directory name becomes the project name) remain reproducible.
 # Allow override via env for ad-hoc runs against a different tag (e.g. when
 # testing a custom-built `blocksnoop:patched-nspid`).
 BLOCKSNOOP_IMAGE_TAG = os.environ.get(
@@ -64,6 +64,12 @@ def test_blocksnoop_attaches_across_pid_namespaces(docker_image, docker_client):
       1. nsenter without ``-p`` → /proc/self/fd unresolvable inside target.
       2. host PID passed to Austin → "Cannot attach to the given process".
     """
+    image = docker_client.images.get(BLOCKSNOOP_IMAGE_TAG)
+    assert BLOCKSNOOP_IMAGE_TAG in image.tags, (
+        "docker-compose must tag the locally built image consistently, even "
+        "when the checkout is a worktree"
+    )
+
     target = docker_client.containers.run(
         TARGET_IMAGE,
         command=["python", "-c", TARGET_SCRIPT],
