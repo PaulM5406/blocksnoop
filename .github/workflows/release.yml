@@ -76,7 +76,8 @@ jobs:
               dnf install -y clang gcc make libbpf-devel elfutils-libelf-devel zlib-devel pkgconf-pkg-config
               /opt/python/cp312-cp312/bin/python -m pip install --no-cache-dir auditwheel
               export PATH=/opt/python/cp312-cp312/bin:$PATH
-              WHEEL_OUTPUT_DIR=/project/wheelhouse scripts/build_native_wheel.sh
+              LOADER_CPPFLAGS=-DBLOCKSNOOP_LIBBPF_LEGACY_PERF_BUFFER \
+                WHEEL_OUTPUT_DIR=/project/wheelhouse scripts/build_native_wheel.sh
             '
       - name: Verify native wheel ABI and assets
         env:

@@ -30,9 +30,6 @@ def run_blocksnoop_docker(
     """Run blocksnoop in Docker against a test fixture, return parsed result."""
     remote_image = os.environ.get("BLOCKSNOOP_TEST_IMAGE")
     if remote_image:
-        # The production image excludes tests. Pass the fixture as an argv
-        # value so release smokes exercise the pulled artifact without a
-        # checkout bind mount.
         cmd = [
             "docker",
             "run",
@@ -67,10 +64,9 @@ def run_blocksnoop_docker(
         ]
     if extra_args:
         cmd.extend(extra_args)
-    if remote_image:
-        cmd.extend(["--", "python", "-c", Path(fixture).read_text()])
-    else:
-        cmd.extend(["--", "python", fixture])
+    # The Core-only image intentionally excludes the repository tests. Pass
+    # fixture source as an argv value for both local and published images.
+    cmd.extend(["--", "python", "-c", Path(fixture).read_text()])
 
     proc = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout_s + 30)
 

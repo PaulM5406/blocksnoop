@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import textwrap
+
 import pytest
 
 pytestmark = pytest.mark.docker
@@ -14,7 +16,8 @@ def test_core_only_image_embeds_native_assets_without_bcc(
     command = [
         "sh",
         "-ec",
-        """
+        textwrap.dedent(
+            """
         ! command -v bcc
         ! dpkg-query -W -f='${db:Status-Status}' bpfcc-tools 2>/dev/null | grep -qx installed
         ! find /usr/src -maxdepth 1 -type d -name 'linux-headers*' | grep -q .
@@ -45,6 +48,7 @@ def test_core_only_image_embeds_native_assets_without_bcc(
         assert checks["bpf_object"]["status"] == "pass"
         assert checks["bcc"]["status"] == "warn"
         PY
-        """,
+        """
+        ),
     ]
     docker_client.containers.run(docker_image, command=command, remove=True)
