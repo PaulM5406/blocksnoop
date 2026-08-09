@@ -6,6 +6,7 @@ import bisect
 import glob
 import logging
 import os
+import signal
 import shlex
 import shutil
 import tempfile
@@ -106,7 +107,8 @@ def _create_nsenter_wrapper(pid: int) -> str:
     else:
         austin_invocation = "/proc/self/fd/3"
     lines.append(
-        f'exec nsenter -m -p -t {shlex.quote(str(pid))} -- {austin_invocation} "$@"'
+        f"exec setsid nsenter -m -p -t {shlex.quote(str(pid))} -- "
+        f'{austin_invocation} "$@"'
     )
 
     fd, wrapper = tempfile.mkstemp(prefix=".austin-nsenter-", text=True)
@@ -139,7 +141,7 @@ class StackRingBuffer:
 
     @property
     def overflow_count(self) -> int:
-        """Number of entries lost to overflow."""
+        """Number of old entries rotated out after the buffer became full."""
         return self._overflow_count
 
     def push(self, timestamp_ns: int, stack: PythonStackTrace) -> None:
@@ -151,12 +153,6 @@ class StackRingBuffer:
                 self._count += 1
             else:
                 self._overflow_count += 1
-                if self._overflow_count == 1:
-                    _logger.warning(
-                        "Stack ring buffer overflow (size=%d) — oldest samples "
-                        "are being dropped. Consider increasing buffer size.",
-                        self._size,
-                    )
 
     def _ordered_entries(self) -> list[tuple[int, PythonStackTrace]]:
         """Return entries in chronological order (oldest first). Must hold lock."""
@@ -234,12 +230,31 @@ class StackRingBuffer:
 class _LoopspyAustin(ThreadedAustin):
     """ThreadedAustin subclass that pushes samples to a ring buffer."""
 
-    def __init__(self, ring_buffer: StackRingBuffer, tid: int) -> None:
+    def __init__(
+        self,
+        ring_buffer: StackRingBuffer,
+        tid: int,
+        *,
+        terminate_process_group: bool = False,
+    ) -> None:
         super().__init__()
         self._ring_buffer = ring_buffer
         self._tid = tid
+        self._terminate_process_group = terminate_process_group
         self.sample_count = 0
         self.filtered_count = 0
+
+    def terminate(self) -> None:
+        """Terminate Austin and its nsenter parent when crossing PID namespaces."""
+        if not self._terminate_process_group:
+            super().terminate()
+            return
+        if self._proc is None:
+            raise AustinError("Austin process is not running")
+        try:
+            os.killpg(self._proc.pid, signal.SIGTERM)
+        except ProcessLookupError:
+            pass
 
     def on_metadata(self, metadata: AustinMetadata) -> None:
         _logger.debug("Austin metadata: %s=%s", metadata.name, metadata.value)
@@ -339,7 +354,11 @@ class AustinSampler:
                 austin_tid,
             )
         try:
-            self._austin = _LoopspyAustin(self.ring_buffer, austin_tid)
+            self._austin = _LoopspyAustin(
+                self.ring_buffer,
+                austin_tid,
+                terminate_process_group=nsenter_wrapper is not None,
+            )
             if nsenter_wrapper is not None:
                 # Override austin-python's binary_path (a cached_property) so it
                 # uses our nsenter wrapper instead of the bare austin binary.
@@ -387,7 +406,7 @@ class AustinSampler:
         if self._austin is None:
             return
         _logger.debug(
-            "Stopping Austin (total samples: %d accepted, %d filtered, %d overflows)",
+            "Stopping Austin (total samples: %d accepted, %d filtered, %d rotations)",
             self._austin.sample_count,
             self._austin.filtered_count,
             self.ring_buffer.overflow_count,
