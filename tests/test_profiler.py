@@ -2,11 +2,12 @@
 
 import logging
 import os
+import signal
 import shlex
 import stat
 import tempfile
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 import pytest
 
@@ -278,7 +279,7 @@ def test_sampler_stop_logs_unexpected_error(caplog):
 
 
 def test_ring_buffer_overflow_count():
-    """Overflow count tracks entries lost when buffer is full."""
+    """Overflow count tracks old entries rotated out of the rolling buffer."""
     buf = StackRingBuffer(size=3)
     for i in range(5):
         buf.push(i * 100, _make_stack(i))
@@ -293,20 +294,44 @@ def test_ring_buffer_no_overflow():
     assert buf.overflow_count == 0
 
 
-def test_ring_buffer_overflow_logs_warning(caplog):
-    """First overflow emits a warning log."""
+def test_ring_buffer_rotation_does_not_log_warning(caplog):
+    """Normal rotation of the rolling stack window is not an operational loss."""
     buf = StackRingBuffer(size=2)
     with caplog.at_level(logging.WARNING, logger="blocksnoop.profiler"):
         buf.push(100, _make_stack())
         buf.push(200, _make_stack())
-        assert len(caplog.records) == 0
-        buf.push(300, _make_stack())  # first overflow
-    assert "overflow" in caplog.text.lower()
-    # Second overflow should not emit another warning
-    caplog.clear()
-    with caplog.at_level(logging.WARNING, logger="blocksnoop.profiler"):
+        buf.push(300, _make_stack())
         buf.push(400, _make_stack())
     assert len(caplog.records) == 0
+
+
+def test_loopspy_austin_terminate_kills_cross_namespace_process_group():
+    """Cross-namespace shutdown reaches both nsenter and its forked Austin child."""
+    austin = _LoopspyAustin(
+        StackRingBuffer(),
+        tid=1,
+        terminate_process_group=True,
+    )
+    austin._proc = Mock(pid=4242)
+
+    with patch("blocksnoop.profiler.os.killpg") as killpg:
+        austin.terminate()
+
+    killpg.assert_called_once_with(4242, signal.SIGTERM)
+
+
+def test_loopspy_austin_terminate_same_namespace_uses_austin_process():
+    """Same-namespace shutdown must not signal blocksnoop's own process group."""
+    austin = _LoopspyAustin(StackRingBuffer(), tid=1)
+
+    with (
+        patch("austin.threads.ThreadedAustin.terminate") as terminate,
+        patch("blocksnoop.profiler.os.killpg") as killpg,
+    ):
+        austin.terminate()
+
+    terminate.assert_called_once_with()
+    killpg.assert_not_called()
 
 
 # ---------------------------------------------------------------------------
@@ -384,7 +409,7 @@ def test_create_nsenter_wrapper_includes_fd_redirects():
         # filesystem view, `-p` so /proc (bound to the target's PID ns) can
         # resolve /proc/self/fd/N for the caller. Without `-p`, the caller's
         # host PID isn't visible in the target's /proc and the execve fails.
-        assert f"exec nsenter -m -p -t {pid} --" in script
+        assert f"exec setsid nsenter -m -p -t {pid} --" in script
         assert "/proc/self/fd/4 /proc/self/fd/3" in script
         # fd 3 must be opened before nsenter line
         assert script.index("exec 3<") < script.index("nsenter")
@@ -406,7 +431,7 @@ def test_create_nsenter_wrapper_without_musl_linker():
         assert "exec 3</usr/local/bin/austin" in script
         assert "exec 4<" not in script
         assert "/proc/self/fd/4" not in script
-        assert f"exec nsenter -m -p -t {pid} -- /proc/self/fd/3" in script
+        assert f"exec setsid nsenter -m -p -t {pid} -- /proc/self/fd/3" in script
     finally:
         os.unlink(wrapper)
 
@@ -565,12 +590,19 @@ def test_austin_sampler_filters_on_ns_tid_when_cross_ns():
     host_pid = 833976
     ns_pid = 1
     captured_tids: list[int] = []
+    captured_process_group_modes: list[bool] = []
 
     real_init = _LoopspyAustin.__init__
 
-    def capture_init(self, ring_buffer, tid):
+    def capture_init(self, ring_buffer, tid, *, terminate_process_group=False):
         captured_tids.append(tid)
-        real_init(self, ring_buffer, tid)
+        captured_process_group_modes.append(terminate_process_group)
+        real_init(
+            self,
+            ring_buffer,
+            tid,
+            terminate_process_group=terminate_process_group,
+        )
 
     with (
         patch("blocksnoop.profiler._in_same_mount_ns", return_value=False),
@@ -589,6 +621,7 @@ def test_austin_sampler_filters_on_ns_tid_when_cross_ns():
         f"expected _LoopspyAustin to receive container-local tid {ns_pid}, "
         f"got {captured_tids}"
     )
+    assert captured_process_group_modes == [True]
 
 
 def test_austin_sampler_uses_host_pid_when_same_ns():

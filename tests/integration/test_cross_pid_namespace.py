@@ -88,13 +88,10 @@ def test_default_backend_attaches_across_pid_namespaces(docker_image, docker_cli
 
         # blocksnoop in HOST PID namespace — same topology as a K8s Job with
         # hostPID: true targeting a worker pod that has its own PID ns. Run
-        # detached so we can collect logs even when `timeout` exits with 124
-        # (the expected outcome — Austin runs until the test window closes).
+        # detached so we can deliver SIGTERM exactly like Kubernetes does.
         snoop = docker_client.containers.run(
             docker_image,
             command=[
-                "timeout",
-                str(BLOCKSNOOP_TIMEOUT_S),
                 "blocksnoop",
                 "-t",
                 str(THRESHOLD_MS),
@@ -107,7 +104,9 @@ def test_default_backend_attaches_across_pid_namespaces(docker_image, docker_cli
             detach=True,
         )
         try:
-            snoop.wait(timeout=BLOCKSNOOP_TIMEOUT_S + 10)
+            time.sleep(BLOCKSNOOP_TIMEOUT_S)
+            snoop.kill(signal="SIGTERM")
+            status = snoop.wait(timeout=10)
             output = snoop.logs(stdout=True, stderr=True)
         finally:
             try:
@@ -142,10 +141,12 @@ def test_default_backend_attaches_across_pid_namespaces(docker_image, docker_cli
     assert "Core backend unavailable" not in text, text
     assert "Core sidecar error" not in text, text
     assert '"type":"fatal"' not in text, text
+    assert status["StatusCode"] == 143, text
 
     # Parse JSON events; at least one with a python_stacks payload proves
     # Austin both attached AND read Python frames across the namespace gap.
     events: list[dict] = []
+    summaries: list[dict] = []
     for line in text.splitlines():
         line = line.strip()
         if not (line.startswith("{") and line.endswith("}")):
@@ -160,8 +161,11 @@ def test_default_backend_attaches_across_pid_namespaces(docker_image, docker_cli
             and "python_stacks" in ev
         ):
             events.append(ev)
+        elif isinstance(ev, dict) and ev.get("type") == "session_summary":
+            summaries.append(ev)
 
     assert events, f"no Austin samples with python_stacks emitted; raw output:\n{text}"
+    assert len(summaries) == 1, f"graceful session summary missing; raw output:\n{text}"
     assert all(event["duration_ms"] >= THRESHOLD_MS for event in events)
 
     # The v1 default backend is Core.  Namespace-local ids prove that its

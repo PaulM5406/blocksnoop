@@ -1,5 +1,16 @@
 # Changelog
 
+## [v0.11.1] - 2026-08-09
+
+### Fixed
+
+- Cross-PID-namespace captures now start `nsenter` and Austin in a dedicated
+  process group, allowing SIGTERM cleanup to stop both processes and exit after
+  emitting `session_summary` instead of hanging until an external hard timeout.
+- Normal rotation of the rolling Austin stack buffer no longer emits a
+  misleading overflow warning. The rotation count remains available in debug
+  shutdown logs.
+
 ## [v0.11.0] - 2026-08-08
 
 ### Changed
